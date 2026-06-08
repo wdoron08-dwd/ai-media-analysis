@@ -286,7 +286,7 @@ export default function ReportPage() {
       .reduce((a, d) => ({
         spend: a.spend + Number(d.spend),
         conversions: a.conversions + Number(d.conversions),
-        revenue: a.revenue + Number(d.conversions) * 180,
+        revenue: a.revenue + Number(d.conversions) * (report?.ltv_per_conversion ?? 180)
       }), { spend: 0, conversions: 0, revenue: 0 })
 
     return { last: sum(lastWeekDates), prev: sum(prevWeekDates) }
@@ -305,7 +305,7 @@ export default function ReportPage() {
   // ─── Recalc campaigns ────────────────────────────────────────────────────
 
   const recalcCampaigns = useMemo(() => {
-    const ltv = 180
+    const ltv = report?.ltv_per_conversion ?? 180
     const byName: Record<string, { spend: number; impressions: number; link_clicks: number; conversions: number; secondary_events: number }> = {}
     filteredDaily.forEach(d => {
       if (!byName[d.campaign_name]) byName[d.campaign_name] = { spend: 0, impressions: 0, link_clicks: 0, conversions: 0, secondary_events: 0 }
@@ -397,7 +397,7 @@ export default function ReportPage() {
 }, [filteredDaily, ctrView])
 
   const cpmRoasData = useMemo(() => {
-  const ltv = 180
+  const ltv = report?.ltv_per_conversion ?? 180
   const bucket = (d: DailyRow) => {
     if (cpmView === 'daily') return d.date
     const dt = new Date(d.date), day = dt.getDay()
