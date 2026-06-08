@@ -87,7 +87,7 @@ export default function UploadPage() {
   })
 
   useEffect(() => {
-    supabase.from('client_profiles').select('*').order('client_name').then(({ data }) => {
+    supabase.from('client_profiles').select('*').order('client_name').then(({ data }: { data: any[] | null }) => {
       if (data) setProfiles(data)
     })
   }, [])
