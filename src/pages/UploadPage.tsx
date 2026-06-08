@@ -115,7 +115,7 @@ export default function UploadPage() {
 
   const calculateAccountAverages = (data: Record<string, unknown>[], map: Record<string, string>, ltv: number) => {
     const get = (row: Record<string, unknown>, key: string) => parseFloat(row[map[key]] as string) || 0
-    const totals = data.reduce((acc, row) => ({
+    const totals = data.reduce((acc: { spend: number; impressions: number; link_clicks: number; conversions: number; frequency: number }, row) => ({
       spend: acc.spend + get(row, 'spend'),
       impressions: acc.impressions + get(row, 'impressions'),
       link_clicks: acc.link_clicks + get(row, 'link_clicks'),

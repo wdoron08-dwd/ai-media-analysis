@@ -904,9 +904,9 @@ export default function ReportPage() {
             {/* This Week + Next Week — side by side */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '14px' }}>
               {[
-                { label: 'This Week', key: 'this_week', color: '#d97706', dot: '#fcd34d', bg: '#fffbeb', border: '#fde68a' },
-                { label: 'Next Week', key: 'next_week', color: '#2563eb', dot: '#93c5fd', bg: '#eff6ff', border: '#bfdbfe' },
-              ].map(({ label, key, color, dot, bg, border }) => (
+                { label: 'This Week', key: 'this_week', color: '#d97706', dot: '#fcd34d' },
+{ label: 'Next Week', key: 'next_week', color: '#2563eb', dot: '#93c5fd' },
+              ].map(({ label, key, color, dot }) => (
                 <div key={key} style={{ ...card, padding: '20px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '7px', marginBottom: '14px' }}>
                     <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: color }} />
