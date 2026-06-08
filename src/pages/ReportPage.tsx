@@ -27,6 +27,7 @@ interface Report {
   total_conversions: number
   total_simulated_revenue: number
   kpi_targets: Record<string, number>
+  ltv_per_conversion: number
   data_quality: Record<string, boolean | string | number | null>
 }
 
