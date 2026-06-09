@@ -87,6 +87,7 @@ interface DailyRow {
   ctr: number | null
   conversion_rate: number | null
   cpm: number | null
+  frequency: number | null
   objective: string | null
   performance_goal: string | null
 }
@@ -439,31 +440,34 @@ setPeriodAnalyses(paMap)
 }, [filteredDaily, cpmView])
 
   const filteredKpis = useMemo(() => {
-  if (!filteredDaily.length) return kpis
-  const totals = filteredDaily.reduce((a, d) => ({
-    spend: a.spend + Number(d.spend),
-    impressions: a.impressions + Number(d.impressions),
-    link_clicks: a.link_clicks + Number(d.link_clicks),
-    conversions: a.conversions + Number(d.conversions),
-  }), { spend: 0, impressions: 0, link_clicks: 0, conversions: 0 })
-  const ltv = 180
-  const revenue = totals.conversions * ltv
-  const computed: Record<string, number> = {
-    CPA: totals.conversions > 0 ? totals.spend / totals.conversions : 0,
-    ROAS: totals.spend > 0 ? (revenue / totals.spend) * 100 : 0,
-    CTR: totals.impressions > 0 ? (totals.link_clicks / totals.impressions) * 100 : 0,
-    'Conversion Rate': totals.link_clicks > 0 ? (totals.conversions / totals.link_clicks) * 100 : 0,
-  }
-  return kpis.map(k => ({
-    ...k,
-    value: computed[k.metric] !== undefined ? computed[k.metric] : k.value,
-    status: computed[k.metric] !== undefined
-      ? (k.metric === 'CPA'
-          ? computed[k.metric] <= k.target ? 'ON_TRACK' : computed[k.metric] <= k.target * 1.2 ? 'AT_RISK' : 'UNDERPERFORMING'
-          : computed[k.metric] >= k.target ? 'ON_TRACK' : computed[k.metric] >= k.target * 0.8 ? 'AT_RISK' : 'UNDERPERFORMING')
-      : k.status
-  }))
-}, [kpis, filteredDaily])
+    if (!filteredDaily.length) return kpis
+    const totals = filteredDaily.reduce((a, d) => ({
+      spend: a.spend + Number(d.spend),
+      impressions: a.impressions + Number(d.impressions),
+      link_clicks: a.link_clicks + Number(d.link_clicks),
+      conversions: a.conversions + Number(d.conversions),
+      frequency_sum: a.frequency_sum + Number((d as any).frequency || 0),
+      frequency_count: a.frequency_count + (Number((d as any).frequency || 0) > 0 ? 1 : 0),
+    }), { spend: 0, impressions: 0, link_clicks: 0, conversions: 0, frequency_sum: 0, frequency_count: 0 })
+    const ltv = report?.ltv_per_conversion ?? 180
+    const revenue = totals.conversions * ltv
+    const computed: Record<string, number> = {
+      CPA: totals.conversions > 0 ? totals.spend / totals.conversions : 0,
+      ROAS: totals.spend > 0 ? (revenue / totals.spend) * 100 : 0,
+      CTR: totals.impressions > 0 ? (totals.link_clicks / totals.impressions) * 100 : 0,
+      'Conversion Rate': totals.link_clicks > 0 ? (totals.conversions / totals.link_clicks) * 100 : 0,
+      Frequency: totals.frequency_count > 0 ? totals.frequency_sum / totals.frequency_count : 0,
+    }
+    return kpis.map(k => ({
+      ...k,
+      value: computed[k.metric] !== undefined ? computed[k.metric] : k.value,
+      status: computed[k.metric] !== undefined
+        ? (k.metric === 'CPA' || k.metric === 'Frequency'
+            ? computed[k.metric] <= k.target ? 'ON_TRACK' : computed[k.metric] <= k.target * 1.2 ? 'AT_RISK' : 'UNDERPERFORMING'
+            : computed[k.metric] >= k.target ? 'ON_TRACK' : computed[k.metric] >= k.target * 0.8 ? 'AT_RISK' : 'UNDERPERFORMING')
+        : k.status
+    }))
+  }, [kpis, filteredDaily, report])
  
 const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).filter(Boolean))] as string[], [dailyData])
   const goals = useMemo(() => [...new Set(dailyData.map(d => d.performance_goal).filter(Boolean))] as string[], [dailyData])
