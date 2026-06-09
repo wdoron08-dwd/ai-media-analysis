@@ -30,6 +30,20 @@ interface Report {
   ltv_per_conversion: number
   data_quality: Record<string, boolean | string | number | null>
 }
+interface PeriodAnalysis {
+  id: string
+  report_id: string
+  period: string
+  status: string
+  executive_summary: string | null
+  overall_health: string | null
+  kpi_breakdown: KpiSummary[] | null
+  campaigns: { campaign_name: string; verdict: string; confidence: number; primary_issue: string | null; recommendation: string }[] | null
+  funnel_insight: string | null
+  action_plan: { immediate: string[]; this_week: string[]; next_week: string[] } | null
+  budget_reallocation: string | null
+  next_test: string | null
+}
 
 interface KpiSummary {
   metric: string
@@ -213,6 +227,7 @@ export default function ReportPage() {
   const [cpmView, setCpmView] = useState<'weekly' | 'daily'>('weekly')
   const [expandedRow, setExpandedRow] = useState<string | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState(false)
+  const [periodAnalyses, setPeriodAnalyses] = useState<Record<string, PeriodAnalysis>>({})
   const [showConfTooltip, setShowConfTooltip] = useState(false)
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
@@ -236,15 +251,19 @@ export default function ReportPage() {
     if (!id) return
     const load = async () => {
       try {
-        const [{ data: r }, { data: k }, { data: c }, { data: d }] = await Promise.all([
-          supabase.from('reports').select('*').eq('id', id).single(),
-          supabase.from('kpi_summary').select('*').eq('report_id', id),
-          supabase.from('campaigns').select('*').eq('report_id', id).order('spend', { ascending: false }),
-          supabase.from('daily_data').select('*').eq('report_id', id).order('date', { ascending: true }),
-        ])
+        const [{ data: r }, { data: k }, { data: c }, { data: d }, { data: pa }] = await Promise.all([
+  supabase.from('reports').select('*').eq('id', id).single(),
+  supabase.from('kpi_summary').select('*').eq('report_id', id),
+  supabase.from('campaigns').select('*').eq('report_id', id).order('spend', { ascending: false }),
+  supabase.from('daily_data').select('*').eq('report_id', id).order('date', { ascending: true }),
+  supabase.from('report_analyses').select('*').eq('report_id', id),
+])
         if (!r) { setError('Report not found.'); return }
         setReport(r); setKpis(k || []); setCampaigns(c || []); setDailyData(d || [])
-        setDateFrom(r.date_range_start || ''); setDateTo(r.date_range_end || '')
+setDateFrom(r.date_range_start || ''); setDateTo(r.date_range_end || '')
+const paMap: Record<string, PeriodAnalysis> = {}
+for (const row of (pa || [])) { paMap[row.period] = row }
+setPeriodAnalyses(paMap)
       } catch { setError('Failed to load report.') }
       finally { setLoading(false) }
     }
@@ -444,9 +463,44 @@ export default function ReportPage() {
       : k.status
   }))
 }, [kpis, filteredDaily])
-  const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).filter(Boolean))] as string[], [dailyData])
+const displayKpis = useMemo(() => {
+    if (activeAnalysis?.kpi_breakdown) return activeAnalysis.kpi_breakdown
+    return filteredKpis
+  }, [activeAnalysis, filteredKpis])  
+const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).filter(Boolean))] as string[], [dailyData])
   const goals = useMemo(() => [...new Set(dailyData.map(d => d.performance_goal).filter(Boolean))] as string[], [dailyData])
+  const activePeriod = useMemo(() => {
+    if (!report?.date_range_end || !dateFrom) return 'full'
+    const [ey, em, ed] = report.date_range_end.split('-').map(Number)
+    const endMs = Date.UTC(ey, em - 1, ed)
+    const cutoff7d = new Date(endMs - 6 * 86400000).toISOString().split('T')[0]
+    const cutoff30d = new Date(endMs - 29 * 86400000).toISOString().split('T')[0]
+    if (dateFrom === cutoff7d && dateTo === report.date_range_end) return '7d'
+    if (dateFrom === cutoff30d && dateTo === report.date_range_end) return '30d'
+    return 'full'
+  }, [dateFrom, dateTo, report])
+
+  const activeAnalysis = useMemo(() => {
+    if (activePeriod === 'full') return null
+    const pa = periodAnalyses[activePeriod]
+    if (!pa || pa.status !== 'ready') return null
+    return pa
+  }, [activePeriod, periodAnalyses])
+
+  const isPeriodPending = useMemo(() => {
+    if (activePeriod === 'full') return false
+    const pa = periodAnalyses[activePeriod]
+    return !pa || pa.status === 'pending'
+  }, [activePeriod, periodAnalyses])
   const isDateFiltered = report && (dateFrom !== report.date_range_start || dateTo !== report.date_range_end)
+  const displayCampaigns = useMemo(() => {
+    if (!activeAnalysis?.campaigns) return filteredCampaigns
+    return filteredCampaigns.map(c => {
+      const pa = activeAnalysis.campaigns!.find(p => p.campaign_name === c.campaign_name)
+      if (!pa) return c
+      return { ...c, verdict: pa.verdict, confidence: pa.confidence, primary_issue: pa.primary_issue, recommendation: pa.recommendation }
+    })
+  }, [filteredCampaigns, activeAnalysis])
   const hasFilters = !!(filterObjective || filterGoal || filterVerdict || filterName || isDateFiltered)
 
   const handleDelete = async () => {
@@ -551,12 +605,23 @@ export default function ReportPage() {
         </div>
       </div>
 
-      {hasFilters && (
-        <div style={{ background: '#fffbeb', borderBottom: '1px solid #fde68a', padding: '8px 28px' }}>
+      {(hasFilters || activePeriod !== 'full') && (
+        <div style={{
+          borderBottom: '1px solid',
+          borderColor: activePeriod !== 'full' && !isPeriodPending ? '#bfdbfe' : '#fde68a',
+          background: activePeriod !== 'full' && !isPeriodPending ? '#eff6ff' : '#fffbeb',
+          padding: '8px 28px'
+        }}>
           <div style={{ maxWidth: '1440px', margin: '0 auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontSize: '13px' }}>⚠️</span>
-            <span style={{ fontSize: '12px', color: '#92400e', fontWeight: '500' }}>
-              Insights analysis reflect the full report period. Charts and table reflect your active filters.
+            <span style={{ fontSize: '13px' }}>
+              {activePeriod !== 'full' && !isPeriodPending ? '🔵' : activePeriod !== 'full' && isPeriodPending ? '⏳' : '⚠️'}
+            </span>
+            <span style={{ fontSize: '12px', fontWeight: '500', color: activePeriod !== 'full' && !isPeriodPending ? '#1e40af' : '#92400e' }}>
+              {activePeriod !== 'full' && !isPeriodPending
+                ? `Showing ${activePeriod === '7d' ? '7-day' : '30-day'} AI insights. Charts and campaign metrics reflect your date filter.`
+                : activePeriod !== 'full' && isPeriodPending
+                ? `AI insights for this period are being prepared — showing full report insights for now.`
+                : 'Insights reflect the full report period. Charts and table reflect your active filters.'}
             </span>
           </div>
         </div>
@@ -571,9 +636,9 @@ export default function ReportPage() {
             <div style={{ fontSize: '15px', fontWeight: '800', color: '#111827', letterSpacing: '-0.4px', marginBottom: '6px', lineHeight: 1.2 }}>
               {report.client_name || report.conversion_label}
             </div>
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px', borderRadius: '20px', marginBottom: '8px', background: hbg(report.overall_health), border: `1px solid ${hc(report.overall_health)}25` }}>
-              <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: hc(report.overall_health) }} />
-              <span style={{ fontSize: '11px', fontWeight: '700', color: hc(report.overall_health) }}>{report.overall_health}</span>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px', borderRadius: '20px', marginBottom: '8px', background: hbg(activeAnalysis?.overall_health ?? report.overall_health), border: `1px solid ${hc(activeAnalysis?.overall_health ?? report.overall_health)}25` }}>
+              <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: hc(activeAnalysis?.overall_health ?? report.overall_health) }} />
+              <span style={{ fontSize: '11px', fontWeight: '700', color: hc(activeAnalysis?.overall_health ?? report.overall_health) }}>{activeAnalysis?.overall_health ?? report.overall_health}</span>
             </div>
             <div style={{ fontSize: '11px', color: '#9ca3af', marginBottom: '20px', fontFamily: 'monospace' }}>
               {report.date_range_start} → {report.date_range_end}
@@ -634,7 +699,7 @@ export default function ReportPage() {
             <div style={{ ...card, padding: '24px' }}>
               <span style={secLabel}>Executive Summary</span>
               <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                {splitBullets(report.executive_summary).map((s, i) => (
+                {splitBullets(activeAnalysis?.executive_summary ?? report.executive_summary).map((s, i) => (
                   <li key={i} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
                     <div style={{ width: '5px', height: '5px', borderRadius: '50%', background: '#2563eb', marginTop: '8px', flexShrink: 0 }} />
                     <span style={{ fontSize: '13px', lineHeight: '1.75', color: '#374151' }}>{s.trim()}</span>
@@ -648,7 +713,7 @@ export default function ReportPage() {
           <div ref={sectionRefs.kpis}>
             <span style={secLabel}>KPI Performance</span>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '14px' }}>
-              {filteredKpis.map(kpi => (
+              {displayKpis.map(kpi => (
                 <div key={kpi.metric} style={{ ...card, padding: '20px' }}>
                   <div style={{ fontSize: '10px', color: '#9ca3af', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '12px' }}>{kpi.metric}</div>
                   <div style={{ fontSize: '30px', fontWeight: '800', color: sc(kpi.status), lineHeight: 1, letterSpacing: '-1.5px', fontFamily: "'SF Mono', monospace", marginBottom: '6px' }}>
@@ -772,11 +837,11 @@ export default function ReportPage() {
 </div>
 
               {/* Funnel Insight inline below charts */}
-              {report.funnel_insight && (
+              {(activeAnalysis?.funnel_insight ?? report.funnel_insight) && (
                 <div style={{ ...card, padding: '20px', marginTop: '14px', borderLeft: '3px solid #2563eb' }}>
                   <span style={{ ...secLabel, color: '#2563eb' }}>Funnel Insight</span>
                   <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {splitBullets(report.funnel_insight).map((s, i) => (
+                    {splitBullets(activeAnalysis?.funnel_insight ?? report.funnel_insight ?? '').map((s, i) => (
                       <li key={i} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
                         <div style={{ width: '5px', height: '5px', borderRadius: '50%', background: '#2563eb', marginTop: '8px', flexShrink: 0 }} />
                         <span style={{ fontSize: '13px', lineHeight: '1.7', color: '#374151' }}>{s.trim()}</span>
@@ -836,7 +901,7 @@ export default function ReportPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredCampaigns.map((c, i) => (
+                  {displayCampaigns.map((c, i) => (
                     <>
                       <tr key={c.campaign_name}
                         onClick={() => setExpandedRow(expandedRow === c.campaign_name ? null : c.campaign_name)}
@@ -893,7 +958,7 @@ export default function ReportPage() {
                 <span style={{ fontSize: '11px', color: '#9ca3af', fontWeight: '400' }}>— Take action today</span>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '10px' }}>
-                {(report.action_plan.immediate || []).map((item, i) => (
+                {((activeAnalysis?.action_plan ?? report.action_plan).immediate || []).map((item, i) => (
                   <div key={i} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', background: '#fff9f9', borderRadius: '8px', padding: '12px', border: '1px solid #fee2e2' }}>
                     <div style={{ width: '20px', height: '20px', borderRadius: '50%', background: '#fef2f2', border: '1px solid #fca5a5', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: '10px', fontWeight: '700', color: '#dc2626' }}>{i + 1}</div>
                     <span style={{ fontSize: '12px', lineHeight: '1.65', color: '#374151' }}>{item}</span>
@@ -914,7 +979,7 @@ export default function ReportPage() {
                     <span style={{ fontSize: '11px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '0.8px', color }}>{label}</span>
                   </div>
                   <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {(report.action_plan[key as keyof typeof report.action_plan] || []).map((item, i) => (
+                    {((activeAnalysis?.action_plan ?? report.action_plan)[key as keyof typeof report.action_plan] || []).map((item, i) => (
                       <li key={i} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
                         <div style={{ width: '4px', height: '4px', borderRadius: '50%', background: dot, marginTop: '8px', flexShrink: 0 }} />
                         <span style={{ fontSize: '12px', lineHeight: '1.65', color: '#374151' }}>{item}</span>
@@ -927,15 +992,15 @@ export default function ReportPage() {
 
             {/* Budget + Next Test — compact strips */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
-              {report.budget_reallocation && (
+              {(activeAnalysis?.budget_reallocation ?? report.budget_reallocation) && (
                 <div style={{ ...card, padding: '18px', borderLeft: '3px solid #d97706' }}>
                   <span style={{ ...secLabel, color: '#d97706' }}>Budget Reallocation</span>
-                  <p style={{ fontSize: '13px', lineHeight: '1.75', margin: 0, color: '#374151' }}>{report.budget_reallocation}</p>
+                  <p style={{ fontSize: '13px', lineHeight: '1.75', margin: 0, color: '#374151' }}>{activeAnalysis?.budget_reallocation ?? report.budget_reallocation}</p>
                 </div>
               )}
               <div style={{ ...card, padding: '18px', borderLeft: '3px solid #16a34a' }}>
                 <span style={{ ...secLabel, color: '#16a34a' }}>Next Test</span>
-                <p style={{ fontSize: '13px', lineHeight: '1.75', margin: 0, color: '#374151' }}>{report.next_test}</p>
+                <p style={{ fontSize: '13px', lineHeight: '1.75', margin: 0, color: '#374151' }}>{activeAnalysis?.next_test ?? report.next_test}</p>
               </div>
             </div>
           </div>
