@@ -30,6 +30,7 @@ interface Report {
   ltv_per_conversion: number
   data_quality: Record<string, boolean | string | number | null>
 }
+
 interface PeriodAnalysis {
   id: string
   report_id: string
@@ -103,6 +104,18 @@ const fmtM = (n: number) => n >= 1e6 ? `$${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? 
 const fmtSpend = (n: number) => `$${Math.round(n).toLocaleString('en-US')}`
 const fmt = (n: number | null, pre = '', suf = '', d = 2) => n == null ? '—' : `${pre}${Number(n).toFixed(d)}${suf}`
 const splitBullets = (text: string) => text ? text.split(/(?<=[.!?])\s+(?=[A-Z])/).filter(s => s.trim().length > 10) : []
+
+// Normalise KPI metric names so lookup is robust regardless of Supabase casing
+// e.g. "Blended CPA", "blended cpa", "CPA" all → "cpa"
+const normaliseMetric = (m: string): string => {
+  const s = m.toLowerCase().replace(/blended\s*/g, '').trim()
+  if (s === 'cpa') return 'cpa'
+  if (s === 'roas') return 'roas'
+  if (s === 'ctr') return 'ctr'
+  if (s.includes('conversion rate') || s === 'cr') return 'conversion_rate'
+  if (s === 'frequency') return 'frequency'
+  return s
+}
 
 const ChartTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null
@@ -239,6 +252,8 @@ export default function ReportPage() {
   const [filterName, setFilterName] = useState('')
   const [sortKey, setSortKey] = useState<keyof Campaign>('spend')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  // Campaign selection state — drives charts/KPI boxes when non-empty
+  const [selectedCampaigns, setSelectedCampaigns] = useState<Set<string>>(new Set())
   const HEADER_OFFSET = 112
 
   const sectionRefs = {
@@ -254,18 +269,18 @@ export default function ReportPage() {
     const load = async () => {
       try {
         const [{ data: r }, { data: k }, { data: c }, { data: d }, { data: pa }] = await Promise.all([
-  supabase.from('reports').select('*').eq('id', id).single(),
-  supabase.from('kpi_summary').select('*').eq('report_id', id),
-  supabase.from('campaigns').select('*').eq('report_id', id).order('spend', { ascending: false }),
-  supabase.from('daily_data').select('*').eq('report_id', id).order('date', { ascending: true }),
-  supabase.from('report_analyses').select('*').eq('report_id', id),
-])
+          supabase.from('reports').select('*').eq('id', id).single(),
+          supabase.from('kpi_summary').select('*').eq('report_id', id),
+          supabase.from('campaigns').select('*').eq('report_id', id).order('spend', { ascending: false }),
+          supabase.from('daily_data').select('*').eq('report_id', id).order('date', { ascending: true }),
+          supabase.from('report_analyses').select('*').eq('report_id', id),
+        ])
         if (!r) { setError('Report not found.'); return }
         setReport(r); setKpis(k || []); setCampaigns(c || []); setDailyData(d || [])
-setDateFrom(r.date_range_start || ''); setDateTo(r.date_range_end || '')
-const paMap: Record<string, PeriodAnalysis> = {}
-for (const row of (pa || [])) { paMap[row.period] = row }
-setPeriodAnalyses(paMap)
+        setDateFrom(r.date_range_start || ''); setDateTo(r.date_range_end || '')
+        const paMap: Record<string, PeriodAnalysis> = {}
+        for (const row of (pa || [])) { paMap[row.period] = row }
+        setPeriodAnalyses(paMap)
       } catch { setError('Failed to load report.') }
       finally { setLoading(false) }
     }
@@ -314,7 +329,9 @@ setPeriodAnalyses(paMap)
     return { last: sum(lastWeekDates), prev: sum(prevWeekDates) }
   }, [dailyData])
 
-  // ─── Filtered daily ───────────────────────────────────────────────────────
+  // ─── Filtered daily (date + objective + goal) ─────────────────────────────
+  // NOTE: filterName (search text) intentionally does NOT filter daily data.
+  // Only explicit campaign selection (selectedCampaigns) scopes charts/KPIs.
 
   const filteredDaily = useMemo(() => dailyData.filter(d => {
     if (dateFrom && d.date < dateFrom) return false
@@ -323,6 +340,14 @@ setPeriodAnalyses(paMap)
     if (filterGoal && d.performance_goal !== filterGoal) return false
     return true
   }), [dailyData, dateFrom, dateTo, filterObjective, filterGoal])
+
+  // ─── Campaign-scoped daily (applies selection on top of filteredDaily) ────
+  // Used for charts and KPI boxes when user has selected specific campaigns.
+
+  const scopedDaily = useMemo(() => {
+    if (selectedCampaigns.size === 0) return filteredDaily
+    return filteredDaily.filter(d => selectedCampaigns.has(d.campaign_name))
+  }, [filteredDaily, selectedCampaigns])
 
   // ─── Recalc campaigns ────────────────────────────────────────────────────
 
@@ -363,85 +388,87 @@ setPeriodAnalyses(paMap)
       return sortDir === 'desc' ? (bv > av ? 1 : -1) : (av > bv ? 1 : -1)
     }), [recalcCampaigns, filterVerdict, filterName, sortKey, sortDir])
 
-  // ─── Chart data ──────────────────────────────────────────────────────────
+  // ─── Chart data (uses scopedDaily) ───────────────────────────────────────
 
   const spendData = useMemo(() => {
     if (spendView === 'daily') {
       const m: Record<string, number> = {}
-      filteredDaily.forEach(d => { m[d.date] = (m[d.date] || 0) + Number(d.spend) })
+      scopedDaily.forEach(d => { m[d.date] = (m[d.date] || 0) + Number(d.spend) })
       return Object.entries(m).map(([date, spend]) => ({ date, spend: Math.round(spend) }))
     }
     const m: Record<string, number> = {}
-    filteredDaily.forEach(d => {
+    scopedDaily.forEach(d => {
       const dt = new Date(d.date), day = dt.getDay()
       const mon = new Date(dt); mon.setDate(dt.getDate() - (day === 0 ? 6 : day - 1))
       const k = mon.toISOString().split('T')[0]
       m[k] = (m[k] || 0) + Number(d.spend)
     })
     return Object.entries(m).sort(([a], [b]) => a.localeCompare(b)).map(([date, spend]) => ({ date, spend: Math.round(spend) }))
-  }, [filteredDaily, spendView])
+  }, [scopedDaily, spendView])
 
   const convCpaData = useMemo(() => {
-  const bucket = (d: DailyRow) => {
-    if (convView === 'daily') return d.date
-    const dt = new Date(d.date), day = dt.getDay()
-    const mon = new Date(dt); mon.setDate(dt.getDate() - (day === 0 ? 6 : day - 1))
-    return mon.toISOString().split('T')[0]
-  }
-  const m: Record<string, { conv: number; spend: number }> = {}
-  filteredDaily.forEach(d => {
-    const k = bucket(d)
-    if (!m[k]) m[k] = { conv: 0, spend: 0 }
-    m[k].conv += Number(d.conversions); m[k].spend += Number(d.spend)
-  })
-  return Object.entries(m).sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, v]) => ({ date, conversions: v.conv, cpa: v.conv > 0 ? Math.round(v.spend / v.conv) : null }))
-}, [filteredDaily, convView])
+    const bucket = (d: DailyRow) => {
+      if (convView === 'daily') return d.date
+      const dt = new Date(d.date), day = dt.getDay()
+      const mon = new Date(dt); mon.setDate(dt.getDate() - (day === 0 ? 6 : day - 1))
+      return mon.toISOString().split('T')[0]
+    }
+    const m: Record<string, { conv: number; spend: number }> = {}
+    scopedDaily.forEach(d => {
+      const k = bucket(d)
+      if (!m[k]) m[k] = { conv: 0, spend: 0 }
+      m[k].conv += Number(d.conversions); m[k].spend += Number(d.spend)
+    })
+    return Object.entries(m).sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, v]) => ({ date, conversions: v.conv, cpa: v.conv > 0 ? Math.round(v.spend / v.conv) : null }))
+  }, [scopedDaily, convView])
 
   const ctrCrData = useMemo(() => {
-  const bucket = (d: DailyRow) => {
-    if (ctrView === 'daily') return d.date
-    const dt = new Date(d.date), day = dt.getDay()
-    const mon = new Date(dt); mon.setDate(dt.getDate() - (day === 0 ? 6 : day - 1))
-    return mon.toISOString().split('T')[0]
-  }
-  const m: Record<string, { imp: number; clicks: number; conv: number }> = {}
-  filteredDaily.forEach(d => {
-    const k = bucket(d)
-    if (!m[k]) m[k] = { imp: 0, clicks: 0, conv: 0 }
-    m[k].imp += Number(d.impressions); m[k].clicks += Number(d.link_clicks); m[k].conv += Number(d.conversions)
-  })
-  return Object.entries(m).sort(([a], [b]) => a.localeCompare(b)).map(([date, v]) => ({
-    date,
-    ctr: v.imp > 0 ? Number((v.clicks / v.imp * 100).toFixed(3)) : null,
-    cr: v.clicks > 0 ? Number((v.conv / v.clicks * 100).toFixed(3)) : null,
-  }))
-}, [filteredDaily, ctrView])
+    const bucket = (d: DailyRow) => {
+      if (ctrView === 'daily') return d.date
+      const dt = new Date(d.date), day = dt.getDay()
+      const mon = new Date(dt); mon.setDate(dt.getDate() - (day === 0 ? 6 : day - 1))
+      return mon.toISOString().split('T')[0]
+    }
+    const m: Record<string, { imp: number; clicks: number; conv: number }> = {}
+    scopedDaily.forEach(d => {
+      const k = bucket(d)
+      if (!m[k]) m[k] = { imp: 0, clicks: 0, conv: 0 }
+      m[k].imp += Number(d.impressions); m[k].clicks += Number(d.link_clicks); m[k].conv += Number(d.conversions)
+    })
+    return Object.entries(m).sort(([a], [b]) => a.localeCompare(b)).map(([date, v]) => ({
+      date,
+      ctr: v.imp > 0 ? Number((v.clicks / v.imp * 100).toFixed(3)) : null,
+      cr: v.clicks > 0 ? Number((v.conv / v.clicks * 100).toFixed(3)) : null,
+    }))
+  }, [scopedDaily, ctrView])
 
   const cpmRoasData = useMemo(() => {
-  const ltv = report?.ltv_per_conversion ?? 180
-  const bucket = (d: DailyRow) => {
-    if (cpmView === 'daily') return d.date
-    const dt = new Date(d.date), day = dt.getDay()
-    const mon = new Date(dt); mon.setDate(dt.getDate() - (day === 0 ? 6 : day - 1))
-    return mon.toISOString().split('T')[0]
-  }
-  const m: Record<string, { imp: number; spend: number; rev: number }> = {}
-  filteredDaily.forEach(d => {
-    const k = bucket(d)
-    if (!m[k]) m[k] = { imp: 0, spend: 0, rev: 0 }
-    m[k].imp += Number(d.impressions); m[k].spend += Number(d.spend); m[k].rev += Number(d.conversions) * ltv
-  })
-  return Object.entries(m).sort(([a], [b]) => a.localeCompare(b)).map(([date, v]) => ({
-    date,
-    cpm: v.imp > 0 ? Number((v.spend / v.imp * 1000).toFixed(2)) : null,
-    roas_pct: v.spend > 0 ? Math.round(v.rev / v.spend * 100) : null,
-  }))
-}, [filteredDaily, cpmView])
+    const ltv = report?.ltv_per_conversion ?? 180
+    const bucket = (d: DailyRow) => {
+      if (cpmView === 'daily') return d.date
+      const dt = new Date(d.date), day = dt.getDay()
+      const mon = new Date(dt); mon.setDate(dt.getDate() - (day === 0 ? 6 : day - 1))
+      return mon.toISOString().split('T')[0]
+    }
+    const m: Record<string, { imp: number; spend: number; rev: number }> = {}
+    scopedDaily.forEach(d => {
+      const k = bucket(d)
+      if (!m[k]) m[k] = { imp: 0, spend: 0, rev: 0 }
+      m[k].imp += Number(d.impressions); m[k].spend += Number(d.spend); m[k].rev += Number(d.conversions) * ltv
+    })
+    return Object.entries(m).sort(([a], [b]) => a.localeCompare(b)).map(([date, v]) => ({
+      date,
+      cpm: v.imp > 0 ? Number((v.spend / v.imp * 1000).toFixed(2)) : null,
+      roas_pct: v.spend > 0 ? Math.round(v.rev / v.spend * 100) : null,
+    }))
+  }, [scopedDaily, cpmView])
+
+  // ─── KPI boxes (uses scopedDaily, normalised metric name lookup) ──────────
 
   const filteredKpis = useMemo(() => {
-    if (!filteredDaily.length) return kpis
-    const totals = filteredDaily.reduce((a, d) => ({
+    if (!scopedDaily.length) return kpis
+    const totals = scopedDaily.reduce((a, d) => ({
       spend: a.spend + Number(d.spend),
       impressions: a.impressions + Number(d.impressions),
       link_clicks: a.link_clicks + Number(d.link_clicks),
@@ -449,28 +476,34 @@ setPeriodAnalyses(paMap)
       frequency_sum: a.frequency_sum + Number((d as any).frequency || 0),
       frequency_count: a.frequency_count + (Number((d as any).frequency || 0) > 0 ? 1 : 0),
     }), { spend: 0, impressions: 0, link_clicks: 0, conversions: 0, frequency_sum: 0, frequency_count: 0 })
+
     const ltv = report?.ltv_per_conversion ?? 180
     const revenue = totals.conversions * ltv
+
+    // Keyed by normalised metric name
     const computed: Record<string, number> = {
-      CPA: totals.conversions > 0 ? totals.spend / totals.conversions : 0,
-      ROAS: totals.spend > 0 ? (revenue / totals.spend) * 100 : 0,
-      CTR: totals.impressions > 0 ? (totals.link_clicks / totals.impressions) * 100 : 0,
-      'Conversion Rate': totals.link_clicks > 0 ? (totals.conversions / totals.link_clicks) * 100 : 0,
-      Frequency: totals.frequency_count > 0 ? totals.frequency_sum / totals.frequency_count : 0,
+      cpa: totals.conversions > 0 ? totals.spend / totals.conversions : 0,
+      roas: totals.spend > 0 ? (revenue / totals.spend) * 100 : 0,
+      ctr: totals.impressions > 0 ? (totals.link_clicks / totals.impressions) * 100 : 0,
+      conversion_rate: totals.link_clicks > 0 ? (totals.conversions / totals.link_clicks) * 100 : 0,
+      frequency: totals.frequency_count > 0 ? totals.frequency_sum / totals.frequency_count : 0,
     }
-    return kpis.map(k => ({
-      ...k,
-      value: computed[k.metric] !== undefined ? computed[k.metric] : k.value,
-      status: computed[k.metric] !== undefined
-        ? (k.metric === 'CPA' || k.metric === 'Frequency'
-            ? computed[k.metric] <= k.target ? 'ON_TRACK' : computed[k.metric] <= k.target * 1.2 ? 'AT_RISK' : 'UNDERPERFORMING'
-            : computed[k.metric] >= k.target ? 'ON_TRACK' : computed[k.metric] >= k.target * 0.8 ? 'AT_RISK' : 'UNDERPERFORMING')
-        : k.status
-    }))
-  }, [kpis, filteredDaily, report])
- 
-const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).filter(Boolean))] as string[], [dailyData])
+
+    return kpis.map(k => {
+      const key = normaliseMetric(k.metric)
+      const val = computed[key]
+      if (val === undefined) return k
+      const isInverse = key === 'cpa' || key === 'frequency'
+      const status = isInverse
+        ? val <= k.target ? 'ON_TRACK' : val <= k.target * 1.2 ? 'AT_RISK' : 'UNDERPERFORMING'
+        : val >= k.target ? 'ON_TRACK' : val >= k.target * 0.8 ? 'AT_RISK' : 'UNDERPERFORMING'
+      return { ...k, value: val, status }
+    })
+  }, [kpis, scopedDaily, report])
+
+  const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).filter(Boolean))] as string[], [dailyData])
   const goals = useMemo(() => [...new Set(dailyData.map(d => d.performance_goal).filter(Boolean))] as string[], [dailyData])
+
   const activePeriod = useMemo(() => {
     if (!report?.date_range_end || !dateFrom) return 'full'
     const [ey, em, ed] = report.date_range_end.split('-').map(Number)
@@ -496,6 +529,7 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
     const pa = periodAnalyses[activePeriod]
     return !pa || pa.status === 'pending'
   }, [activePeriod, periodAnalyses])
+
   const displayKpis = useMemo(() => {
     if (!activeAnalysis?.kpi_breakdown) return filteredKpis
     const noteMap: Record<string, string> = {}
@@ -505,7 +539,9 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
       note: noteMap[k.metric] ?? k.note
     }))
   }, [activeAnalysis, filteredKpis])
+
   const isDateFiltered = report && (dateFrom !== report.date_range_start || dateTo !== report.date_range_end)
+
   const displayCampaigns = useMemo(() => {
     if (!activeAnalysis?.campaigns) return filteredCampaigns
     return filteredCampaigns.map(c => {
@@ -514,7 +550,41 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
       return { ...c, verdict: pa.verdict, confidence: pa.confidence, primary_issue: pa.primary_issue, recommendation: pa.recommendation }
     })
   }, [filteredCampaigns, activeAnalysis])
+
   const hasFilters = !!(filterObjective || filterGoal || filterVerdict || filterName || isDateFiltered)
+  const hasCampaignSelection = selectedCampaigns.size > 0
+
+  // ─── Campaign selection helpers ───────────────────────────────────────────
+
+  const visibleCampaignNames = useMemo(() => filteredCampaigns.map(c => c.campaign_name), [filteredCampaigns])
+  const allVisibleSelected = visibleCampaignNames.length > 0 && visibleCampaignNames.every(n => selectedCampaigns.has(n))
+  const someVisibleSelected = visibleCampaignNames.some(n => selectedCampaigns.has(n))
+
+  const toggleCampaign = (name: string) => {
+    setSelectedCampaigns(prev => {
+      const next = new Set(prev)
+      next.has(name) ? next.delete(name) : next.add(name)
+      return next
+    })
+  }
+
+  const toggleAllVisible = () => {
+    if (allVisibleSelected) {
+      setSelectedCampaigns(prev => {
+        const next = new Set(prev)
+        visibleCampaignNames.forEach(n => next.delete(n))
+        return next
+      })
+    } else {
+      setSelectedCampaigns(prev => {
+        const next = new Set(prev)
+        visibleCampaignNames.forEach(n => next.add(n))
+        return next
+      })
+    }
+  }
+
+  const clearCampaignSelection = () => setSelectedCampaigns(new Set())
 
   const handleDelete = async () => {
     if (!id) return
@@ -576,7 +646,6 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
       <div style={{ background: '#fff', borderBottom: '1px solid #f1f1f4', padding: '10px 28px', position: 'sticky', top: '56px', zIndex: 29 }}>
         <div style={{ maxWidth: '1440px', margin: '0 auto', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' as const }}>
 
-          {/* Date dropdown */}
           <DateFilterDropdown
             dateFrom={dateFrom} dateTo={dateTo}
             reportStart={report.date_range_start || ''} reportEnd={report.date_range_end || ''}
@@ -607,10 +676,10 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
             {['SCALE', 'MAINTAIN', 'OPTIMIZE', 'PAUSE'].map(v => <option key={v} value={v}>{v}</option>)}
           </select>
 
-          {hasFilters && (
+          {(hasFilters || hasCampaignSelection) && (
             <button onClick={() => {
               setFilterObjective(''); setFilterGoal(''); setFilterVerdict(''); setFilterName('')
-              clearDates()
+              clearDates(); clearCampaignSelection()
             }} style={{ padding: '6px 12px', borderRadius: '8px', border: '1px solid #fca5a5', background: '#fef2f2', fontSize: '11px', fontWeight: '700', color: '#dc2626', cursor: 'pointer' }}>
               ✕ Clear all
             </button>
@@ -618,26 +687,46 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
         </div>
       </div>
 
-      {(hasFilters || activePeriod !== 'full') && (
-        <div style={{
-          borderBottom: '1px solid',
-          borderColor: activePeriod !== 'full' && !isPeriodPending ? '#bfdbfe' : '#fde68a',
-          background: activePeriod !== 'full' && !isPeriodPending ? '#eff6ff' : '#fffbeb',
-          padding: '8px 28px'
-        }}>
-          <div style={{ maxWidth: '1440px', margin: '0 auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontSize: '13px' }}>
-              {activePeriod !== 'full' && !isPeriodPending ? '🔵' : activePeriod !== 'full' && isPeriodPending ? '⏳' : '⚠️'}
-            </span>
-            <span style={{ fontSize: '12px', fontWeight: '500', color: activePeriod !== 'full' && !isPeriodPending ? '#1e40af' : '#92400e' }}>
-              {activePeriod !== 'full' && !isPeriodPending
-                ? `Showing ${activePeriod === '7d' ? '7-day' : '30-day'} AI insights.${hasFilters ? ' Additional filters affect charts and metrics only.' : ' Charts and campaign metrics reflect your date filter.'}`
-                : activePeriod !== 'full' && isPeriodPending
-                ? `AI insights for this period are being prepared — showing full report insights for now.`
-                : 'Insights reflect the full report period. Charts and table reflect your active filters.'}
-            </span>
-          </div>
-        </div>
+      {/* ── Status Banners ── */}
+      {(hasFilters || hasCampaignSelection || activePeriod !== 'full') && (
+        <>
+          {/* Period / filter banner */}
+          {(hasFilters || activePeriod !== 'full') && (
+            <div style={{
+              borderBottom: '1px solid',
+              borderColor: activePeriod !== 'full' && !isPeriodPending ? '#bfdbfe' : '#fde68a',
+              background: activePeriod !== 'full' && !isPeriodPending ? '#eff6ff' : '#fffbeb',
+              padding: '8px 28px'
+            }}>
+              <div style={{ maxWidth: '1440px', margin: '0 auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '13px' }}>
+                  {activePeriod !== 'full' && !isPeriodPending ? '🔵' : activePeriod !== 'full' && isPeriodPending ? '⏳' : '⚠️'}
+                </span>
+                <span style={{ fontSize: '12px', fontWeight: '500', color: activePeriod !== 'full' && !isPeriodPending ? '#1e40af' : '#92400e' }}>
+                  {activePeriod !== 'full' && !isPeriodPending
+                    ? `Showing ${activePeriod === '7d' ? '7-day' : '30-day'} AI insights.${hasFilters ? ' Additional filters affect charts and metrics only.' : ' Charts and campaign metrics reflect your date filter.'}`
+                    : activePeriod !== 'full' && isPeriodPending
+                    ? `AI insights for this period are being prepared — showing full report insights for now.`
+                    : 'Insights reflect the full report period. Charts and table reflect your active filters.'}
+                </span>
+              </div>
+            </div>
+          )}
+          {/* Campaign selection banner */}
+          {hasCampaignSelection && (
+            <div style={{ borderBottom: '1px solid #fed7aa', background: '#fff7ed', padding: '8px 28px' }}>
+              <div style={{ maxWidth: '1440px', margin: '0 auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '13px' }}>🎯</span>
+                <span style={{ fontSize: '12px', fontWeight: '500', color: '#9a3412' }}>
+                  Charts and KPIs scoped to {selectedCampaigns.size} selected campaign{selectedCampaigns.size !== 1 ? 's' : ''}. AI insights are not affected.
+                </span>
+                <button onClick={clearCampaignSelection} style={{ marginLeft: 'auto', padding: '3px 10px', borderRadius: '6px', border: '1px solid #fdba74', background: '#fff', fontSize: '11px', fontWeight: '700', color: '#c2410c', cursor: 'pointer' }}>
+                  Clear selection
+                </button>
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       {/* ── Body ── */}
@@ -730,13 +819,13 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
                 <div key={kpi.metric} style={{ ...card, padding: '20px' }}>
                   <div style={{ fontSize: '10px', color: '#9ca3af', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '12px' }}>{kpi.metric}</div>
                   <div style={{ fontSize: '30px', fontWeight: '800', color: sc(kpi.status), lineHeight: 1, letterSpacing: '-1.5px', fontFamily: "'SF Mono', monospace", marginBottom: '6px' }}>
-                    {kpi.metric === 'CPA' ? `$${Number(kpi.value).toFixed(2)}` :
-                     kpi.metric === 'ROAS' ? `${Number(kpi.value).toFixed(0)}%` :
-                     kpi.metric === 'Frequency' ? Number(kpi.value).toFixed(2) :
+                    {normaliseMetric(kpi.metric) === 'cpa' ? `$${Number(kpi.value).toFixed(2)}` :
+                     normaliseMetric(kpi.metric) === 'roas' ? `${Number(kpi.value).toFixed(0)}%` :
+                     normaliseMetric(kpi.metric) === 'frequency' ? Number(kpi.value).toFixed(2) :
                      `${Number(kpi.value).toFixed(2)}%`}
                   </div>
                   <div style={{ fontSize: '11px', color: '#d1d5db', marginBottom: '10px' }}>
-                    Target: {kpi.metric === 'CPA' ? `$${kpi.target}` : kpi.metric === 'ROAS' ? `${kpi.target}%` : kpi.metric === 'Frequency' ? kpi.target : `${kpi.target}%`}
+                    Target: {normaliseMetric(kpi.metric) === 'cpa' ? `$${kpi.target}` : normaliseMetric(kpi.metric) === 'roas' ? `${kpi.target}%` : normaliseMetric(kpi.metric) === 'frequency' ? kpi.target : `${kpi.target}%`}
                   </div>
                   <div style={{ display: 'inline-flex', padding: '3px 9px', borderRadius: '5px', fontSize: '10px', fontWeight: '700', background: sc(kpi.status) + '12', color: sc(kpi.status), marginBottom: '10px' }}>
                     {kpi.status.replace('_', ' ')}
@@ -748,7 +837,7 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
           </div>
 
           {/* ── Charts ── */}
-          {filteredDaily.length > 0 && (
+          {scopedDaily.length > 0 && (
             <div ref={sectionRefs.charts}>
               <span style={secLabel}>Performance Trends</span>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
@@ -780,74 +869,74 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
                 </div>
 
                 <div style={{ ...card, padding: '22px' }}>
-  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
-    <span style={{ fontSize: '12px', fontWeight: '700', color: '#374151' }}>Conversions vs CPA</span>
-    <div style={{ display: 'flex', gap: '3px', background: '#f7f8fa', padding: '3px', borderRadius: '7px' }}>
-      {(['weekly', 'daily'] as const).map(v => (
-        <button key={v} onClick={() => setConvView(v)} style={{ padding: '3px 10px', borderRadius: '5px', border: 'none', fontSize: '11px', fontWeight: '600', cursor: 'pointer', background: convView === v ? '#fff' : 'transparent', color: convView === v ? '#2563eb' : '#9ca3af', boxShadow: convView === v ? '0 1px 3px rgba(0,0,0,0.08)' : 'none' }}>{v === 'weekly' ? 'Weekly' : 'Daily'}</button>
-      ))}
-    </div>
-  </div>
-  <ResponsiveContainer width="100%" height={200}>
-    <ComposedChart data={convCpaData}>
-      <CartesianGrid strokeDasharray="3 3" stroke="#f7f8fa" />
-      <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#d1d5db' }} tickLine={false} axisLine={false} />
-      <YAxis yAxisId="l" tick={{ fontSize: 10, fill: '#d1d5db' }} tickLine={false} axisLine={false} />
-      <YAxis yAxisId="r" orientation="right" tick={{ fontSize: 10, fill: '#d1d5db' }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} />
-      <Tooltip content={<ChartTooltip />} />
-      <Legend wrapperStyle={{ fontSize: '11px', color: '#9ca3af' }} />
-      <Bar yAxisId="l" dataKey="conversions" fill="#2563eb" fillOpacity={0.5} name="Conversions" radius={[4, 4, 0, 0]} />
-      <Line yAxisId="r" type="monotone" dataKey="cpa" stroke="#ef4444" strokeWidth={2.5} dot={false} name="CPA ($)" />
-    </ComposedChart>
-  </ResponsiveContainer>
-</div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: '700', color: '#374151' }}>Conversions vs CPA</span>
+                    <div style={{ display: 'flex', gap: '3px', background: '#f7f8fa', padding: '3px', borderRadius: '7px' }}>
+                      {(['weekly', 'daily'] as const).map(v => (
+                        <button key={v} onClick={() => setConvView(v)} style={{ padding: '3px 10px', borderRadius: '5px', border: 'none', fontSize: '11px', fontWeight: '600', cursor: 'pointer', background: convView === v ? '#fff' : 'transparent', color: convView === v ? '#2563eb' : '#9ca3af', boxShadow: convView === v ? '0 1px 3px rgba(0,0,0,0.08)' : 'none' }}>{v === 'weekly' ? 'Weekly' : 'Daily'}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <ResponsiveContainer width="100%" height={200}>
+                    <ComposedChart data={convCpaData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f7f8fa" />
+                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#d1d5db' }} tickLine={false} axisLine={false} />
+                      <YAxis yAxisId="l" tick={{ fontSize: 10, fill: '#d1d5db' }} tickLine={false} axisLine={false} />
+                      <YAxis yAxisId="r" orientation="right" tick={{ fontSize: 10, fill: '#d1d5db' }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} />
+                      <Tooltip content={<ChartTooltip />} />
+                      <Legend wrapperStyle={{ fontSize: '11px', color: '#9ca3af' }} />
+                      <Bar yAxisId="l" dataKey="conversions" fill="#2563eb" fillOpacity={0.5} name="Conversions" radius={[4, 4, 0, 0]} />
+                      <Line yAxisId="r" type="monotone" dataKey="cpa" stroke="#ef4444" strokeWidth={2.5} dot={false} name="CPA ($)" />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
 
                 <div style={{ ...card, padding: '22px' }}>
-  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
-    <span style={{ fontSize: '12px', fontWeight: '700', color: '#374151' }}>CTR vs Conversion Rate</span>
-    <div style={{ display: 'flex', gap: '3px', background: '#f7f8fa', padding: '3px', borderRadius: '7px' }}>
-      {(['weekly', 'daily'] as const).map(v => (
-        <button key={v} onClick={() => setCtrView(v)} style={{ padding: '3px 10px', borderRadius: '5px', border: 'none', fontSize: '11px', fontWeight: '600', cursor: 'pointer', background: ctrView === v ? '#fff' : 'transparent', color: ctrView === v ? '#2563eb' : '#9ca3af', boxShadow: ctrView === v ? '0 1px 3px rgba(0,0,0,0.08)' : 'none' }}>{v === 'weekly' ? 'Weekly' : 'Daily'}</button>
-      ))}
-    </div>
-  </div>
-  <ResponsiveContainer width="100%" height={200}>
-    <ComposedChart data={ctrCrData}>
-      <CartesianGrid strokeDasharray="3 3" stroke="#f7f8fa" />
-      <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#d1d5db' }} tickLine={false} axisLine={false} />
-      <YAxis yAxisId="ctr" tick={{ fontSize: 10, fill: '#2563eb' }} tickLine={false} axisLine={false} tickFormatter={v => `${v}%`} width={36} />
-      <YAxis yAxisId="cr" orientation="right" tick={{ fontSize: 10, fill: '#16a34a' }} tickLine={false} axisLine={false} tickFormatter={v => `${v}%`} width={36} />
-      <Tooltip content={<ChartTooltip />} />
-      <Legend wrapperStyle={{ fontSize: '11px', color: '#9ca3af' }} />
-      <Line yAxisId="ctr" type="monotone" dataKey="ctr" stroke="#2563eb" strokeWidth={2.5} dot={false} name="CTR (%)" />
-      <Line yAxisId="cr" type="monotone" dataKey="cr" stroke="#16a34a" strokeWidth={2.5} dot={false} name="CR (%)" />
-    </ComposedChart>
-  </ResponsiveContainer>
-</div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: '700', color: '#374151' }}>CTR vs Conversion Rate</span>
+                    <div style={{ display: 'flex', gap: '3px', background: '#f7f8fa', padding: '3px', borderRadius: '7px' }}>
+                      {(['weekly', 'daily'] as const).map(v => (
+                        <button key={v} onClick={() => setCtrView(v)} style={{ padding: '3px 10px', borderRadius: '5px', border: 'none', fontSize: '11px', fontWeight: '600', cursor: 'pointer', background: ctrView === v ? '#fff' : 'transparent', color: ctrView === v ? '#2563eb' : '#9ca3af', boxShadow: ctrView === v ? '0 1px 3px rgba(0,0,0,0.08)' : 'none' }}>{v === 'weekly' ? 'Weekly' : 'Daily'}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <ResponsiveContainer width="100%" height={200}>
+                    <ComposedChart data={ctrCrData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f7f8fa" />
+                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#d1d5db' }} tickLine={false} axisLine={false} />
+                      <YAxis yAxisId="ctr" tick={{ fontSize: 10, fill: '#2563eb' }} tickLine={false} axisLine={false} tickFormatter={v => `${v}%`} width={36} />
+                      <YAxis yAxisId="cr" orientation="right" tick={{ fontSize: 10, fill: '#16a34a' }} tickLine={false} axisLine={false} tickFormatter={v => `${v}%`} width={36} />
+                      <Tooltip content={<ChartTooltip />} />
+                      <Legend wrapperStyle={{ fontSize: '11px', color: '#9ca3af' }} />
+                      <Line yAxisId="ctr" type="monotone" dataKey="ctr" stroke="#2563eb" strokeWidth={2.5} dot={false} name="CTR (%)" />
+                      <Line yAxisId="cr" type="monotone" dataKey="cr" stroke="#16a34a" strokeWidth={2.5} dot={false} name="CR (%)" />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
 
                 <div style={{ ...card, padding: '22px' }}>
-  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
-    <span style={{ fontSize: '12px', fontWeight: '700', color: '#374151' }}>CPM vs ROAS %</span>
-    <div style={{ display: 'flex', gap: '3px', background: '#f7f8fa', padding: '3px', borderRadius: '7px' }}>
-      {(['weekly', 'daily'] as const).map(v => (
-        <button key={v} onClick={() => setCpmView(v)} style={{ padding: '3px 10px', borderRadius: '5px', border: 'none', fontSize: '11px', fontWeight: '600', cursor: 'pointer', background: cpmView === v ? '#fff' : 'transparent', color: cpmView === v ? '#2563eb' : '#9ca3af', boxShadow: cpmView === v ? '0 1px 3px rgba(0,0,0,0.08)' : 'none' }}>{v === 'weekly' ? 'Weekly' : 'Daily'}</button>
-      ))}
-    </div>
-  </div>
-  <ResponsiveContainer width="100%" height={200}>
-    <ComposedChart data={cpmRoasData}>
-      <CartesianGrid strokeDasharray="3 3" stroke="#f7f8fa" />
-      <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#d1d5db' }} tickLine={false} axisLine={false} />
-      <YAxis yAxisId="cpm" tick={{ fontSize: 10, fill: '#7c3aed' }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} width={36} />
-      <YAxis yAxisId="roas" orientation="right" tick={{ fontSize: 10, fill: '#16a34a' }} tickLine={false} axisLine={false} tickFormatter={v => `${v}%`} width={42} />
-      <Tooltip content={<ChartTooltip />} />
-      <Legend wrapperStyle={{ fontSize: '11px', color: '#9ca3af' }} />
-      <Line yAxisId="cpm" type="monotone" dataKey="cpm" stroke="#7c3aed" strokeWidth={2.5} dot={false} name="CPM ($)" />
-      <Line yAxisId="roas" type="monotone" dataKey="roas_pct" stroke="#16a34a" strokeWidth={2.5} dot={false} name="ROAS (%)" />
-    </ComposedChart>
-  </ResponsiveContainer>
-</div>
-</div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: '700', color: '#374151' }}>CPM vs ROAS %</span>
+                    <div style={{ display: 'flex', gap: '3px', background: '#f7f8fa', padding: '3px', borderRadius: '7px' }}>
+                      {(['weekly', 'daily'] as const).map(v => (
+                        <button key={v} onClick={() => setCpmView(v)} style={{ padding: '3px 10px', borderRadius: '5px', border: 'none', fontSize: '11px', fontWeight: '600', cursor: 'pointer', background: cpmView === v ? '#fff' : 'transparent', color: cpmView === v ? '#2563eb' : '#9ca3af', boxShadow: cpmView === v ? '0 1px 3px rgba(0,0,0,0.08)' : 'none' }}>{v === 'weekly' ? 'Weekly' : 'Daily'}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <ResponsiveContainer width="100%" height={200}>
+                    <ComposedChart data={cpmRoasData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f7f8fa" />
+                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#d1d5db' }} tickLine={false} axisLine={false} />
+                      <YAxis yAxisId="cpm" tick={{ fontSize: 10, fill: '#7c3aed' }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} width={36} />
+                      <YAxis yAxisId="roas" orientation="right" tick={{ fontSize: 10, fill: '#16a34a' }} tickLine={false} axisLine={false} tickFormatter={v => `${v}%`} width={42} />
+                      <Tooltip content={<ChartTooltip />} />
+                      <Legend wrapperStyle={{ fontSize: '11px', color: '#9ca3af' }} />
+                      <Line yAxisId="cpm" type="monotone" dataKey="cpm" stroke="#7c3aed" strokeWidth={2.5} dot={false} name="CPM ($)" />
+                      <Line yAxisId="roas" type="monotone" dataKey="roas_pct" stroke="#16a34a" strokeWidth={2.5} dot={false} name="ROAS (%)" />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
 
               {/* Funnel Insight inline below charts */}
               {(activeAnalysis?.funnel_insight ?? report.funnel_insight) && (
@@ -872,13 +961,35 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span style={{ fontSize: '13px', fontWeight: '700', color: '#111827' }}>Campaigns</span>
                 <span style={{ fontSize: '11px', fontWeight: '700', color: '#2563eb', background: '#eff6ff', padding: '2px 7px', borderRadius: '10px' }}>{filteredCampaigns.length}</span>
+                {hasCampaignSelection && (
+                  <span style={{ fontSize: '11px', fontWeight: '700', color: '#c2410c', background: '#fff7ed', border: '1px solid #fed7aa', padding: '2px 7px', borderRadius: '10px' }}>
+                    {selectedCampaigns.size} selected
+                  </span>
+                )}
               </div>
-              <span style={{ fontSize: '11px', color: '#9ca3af' }}>Click row to expand recommendation</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                {hasCampaignSelection && (
+                  <button onClick={clearCampaignSelection} style={{ fontSize: '11px', fontWeight: '600', color: '#c2410c', background: 'none', border: 'none', cursor: 'pointer', padding: '0' }}>
+                    Clear selection
+                  </button>
+                )}
+                <span style={{ fontSize: '11px', color: '#9ca3af' }}>Click row to expand · Checkbox to scope charts</span>
+              </div>
             </div>
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
                 <thead>
                   <tr style={{ background: '#f9fafb' }}>
+                    {/* Checkbox column header */}
+                    <th style={{ padding: '11px 14px', width: '36px', borderBottom: '1px solid #f1f1f4' }}>
+                      <input
+                        type="checkbox"
+                        checked={allVisibleSelected}
+                        ref={el => { if (el) el.indeterminate = someVisibleSelected && !allVisibleSelected }}
+                        onChange={toggleAllVisible}
+                        style={{ cursor: 'pointer', width: '14px', height: '14px', accentColor: '#2563eb' }}
+                      />
+                    </th>
                     {([
                       { label: 'Campaign', key: 'campaign_name' },
                       { label: 'Objective', key: 'objective' },
@@ -914,46 +1025,66 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
                   </tr>
                 </thead>
                 <tbody>
-                  {displayCampaigns.map((c, i) => (
-                    <>
-                      <tr key={c.campaign_name}
-                        onClick={() => setExpandedRow(expandedRow === c.campaign_name ? null : c.campaign_name)}
-                        style={{ borderTop: '1px solid #f7f8fa', background: expandedRow === c.campaign_name ? '#f0f7ff' : i % 2 === 0 ? '#fff' : '#fafafa', cursor: 'pointer' }}
-                        onMouseEnter={e => { if (expandedRow !== c.campaign_name) e.currentTarget.style.background = '#f8faff' }}
-                        onMouseLeave={e => { if (expandedRow !== c.campaign_name) e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#fafafa' }}>
-                        <td style={{ padding: '11px 14px', maxWidth: '180px' }}>
-                          <div style={{ fontWeight: '600', color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.campaign_name}>{c.campaign_name}</div>
-                        </td>
-                        <td style={{ padding: '11px 14px', color: '#64748b' }}>{c.objective || '—'}</td>
-                        <td style={{ padding: '11px 14px', color: '#64748b' }}>{c.performance_goal || '—'}</td>
-                        <td style={{ padding: '11px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{fmtSpend(Number(c.spend))}</td>
-                        <td style={{ padding: '11px 14px', fontFamily: 'monospace' }}>{c.conversions.toLocaleString()}</td>
-                        <td style={{ padding: '11px 14px', fontFamily: 'monospace' }}>{fmt(c.cpa, '$')}</td>
-                        <td style={{ padding: '11px 14px', fontFamily: 'monospace' }}>{c.roas != null ? `${(Number(c.roas) * 100).toFixed(0)}%` : '—'}</td>
-                        <td style={{ padding: '11px 14px', fontFamily: 'monospace' }}>{fmt(c.ctr, '', '%')}</td>
-                        <td style={{ padding: '11px 14px', fontFamily: 'monospace' }}>{fmt(c.conversion_rate, '', '%')}</td>
-                        <td style={{ padding: '11px 14px', fontFamily: 'monospace' }}>{fmt(c.cpm, '$')}</td>
-                        <td style={{ padding: '11px 14px' }}>
-                          <span style={{ padding: '3px 9px', borderRadius: '5px', fontSize: '10px', fontWeight: '700', background: vbg(c.verdict), color: vc(c.verdict) }}>{c.verdict}</span>
-                        </td>
-                        <td style={{ padding: '11px 14px', fontFamily: 'monospace', color: '#64748b', fontWeight: '600' }}>{c.confidence}</td>
-                      </tr>
-                      {expandedRow === c.campaign_name && (
-                        <tr key={`${c.campaign_name}-exp`}>
-                          <td colSpan={12} style={{ padding: '16px 22px', background: '#f0f7ff', borderTop: '1px solid #dbeafe' }}>
-                            {c.primary_issue && (
-                              <div style={{ fontSize: '12px', color: '#dc2626', fontWeight: '600', marginBottom: '8px', display: 'flex', gap: '6px', alignItems: 'center' }}>
-                                <span>⚠</span> {c.primary_issue}
-                              </div>
-                            )}
-                            <div style={{ fontSize: '12px', color: '#374151', lineHeight: '1.7' }}>
-                              <strong style={{ color: '#111827' }}>Recommendation: </strong>{c.recommendation}
+                  {displayCampaigns.map((c, i) => {
+                    const isSelected = selectedCampaigns.has(c.campaign_name)
+                    const isExpanded = expandedRow === c.campaign_name
+                    const rowBg = isSelected
+                      ? '#fff7ed'
+                      : isExpanded
+                      ? '#f0f7ff'
+                      : i % 2 === 0 ? '#fff' : '#fafafa'
+                    return (
+                      <>
+                        <tr key={c.campaign_name}
+                          style={{ borderTop: '1px solid #f7f8fa', background: rowBg, cursor: 'pointer' }}
+                          onMouseEnter={e => { if (!isSelected && !isExpanded) e.currentTarget.style.background = '#f8faff' }}
+                          onMouseLeave={e => { if (!isSelected && !isExpanded) e.currentTarget.style.background = rowBg }}>
+                          {/* Checkbox cell — stops row expand propagation */}
+                          <td style={{ padding: '11px 14px' }} onClick={e => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleCampaign(c.campaign_name)}
+                              style={{ cursor: 'pointer', width: '14px', height: '14px', accentColor: '#2563eb' }}
+                            />
+                          </td>
+                          <td style={{ padding: '11px 14px', maxWidth: '180px' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>
+                            <div style={{ fontWeight: '600', color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }} title={c.campaign_name}>
+                              {isSelected && <div style={{ width: '5px', height: '5px', borderRadius: '50%', background: '#c2410c', flexShrink: 0 }} />}
+                              {c.campaign_name}
                             </div>
                           </td>
+                          <td style={{ padding: '11px 14px', color: '#64748b' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{c.objective || '—'}</td>
+                          <td style={{ padding: '11px 14px', color: '#64748b' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{c.performance_goal || '—'}</td>
+                          <td style={{ padding: '11px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{fmtSpend(Number(c.spend))}</td>
+                          <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{c.conversions.toLocaleString()}</td>
+                          <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{fmt(c.cpa, '$')}</td>
+                          <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{c.roas != null ? `${(Number(c.roas) * 100).toFixed(0)}%` : '—'}</td>
+                          <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{fmt(c.ctr, '', '%')}</td>
+                          <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{fmt(c.conversion_rate, '', '%')}</td>
+                          <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{fmt(c.cpm, '$')}</td>
+                          <td style={{ padding: '11px 14px' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>
+                            <span style={{ padding: '3px 9px', borderRadius: '5px', fontSize: '10px', fontWeight: '700', background: vbg(c.verdict), color: vc(c.verdict) }}>{c.verdict}</span>
+                          </td>
+                          <td style={{ padding: '11px 14px', fontFamily: 'monospace', color: '#64748b', fontWeight: '600' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{c.confidence}</td>
                         </tr>
-                      )}
-                    </>
-                  ))}
+                        {isExpanded && (
+                          <tr key={`${c.campaign_name}-exp`}>
+                            <td colSpan={13} style={{ padding: '16px 22px', background: '#f0f7ff', borderTop: '1px solid #dbeafe' }}>
+                              {c.primary_issue && (
+                                <div style={{ fontSize: '12px', color: '#dc2626', fontWeight: '600', marginBottom: '8px', display: 'flex', gap: '6px', alignItems: 'center' }}>
+                                  <span>⚠</span> {c.primary_issue}
+                                </div>
+                              )}
+                              <div style={{ fontSize: '12px', color: '#374151', lineHeight: '1.7' }}>
+                                <strong style={{ color: '#111827' }}>Recommendation: </strong>{c.recommendation}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -963,7 +1094,6 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
           <div ref={sectionRefs.actions}>
             <span style={secLabel}>Action Plan</span>
 
-            {/* Immediate — full width, prominent */}
             <div style={{ ...card, padding: '22px', marginBottom: '14px', borderLeft: '4px solid #dc2626' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
                 <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#dc2626' }} />
@@ -980,11 +1110,10 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
               </div>
             </div>
 
-            {/* This Week + Next Week — side by side */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '14px' }}>
               {[
                 { label: 'This Week', key: 'this_week', color: '#d97706', dot: '#fcd34d' },
-{ label: 'Next Week', key: 'next_week', color: '#2563eb', dot: '#93c5fd' },
+                { label: 'Next Week', key: 'next_week', color: '#2563eb', dot: '#93c5fd' },
               ].map(({ label, key, color, dot }) => (
                 <div key={key} style={{ ...card, padding: '20px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '7px', marginBottom: '14px' }}>
@@ -1003,7 +1132,6 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
               ))}
             </div>
 
-            {/* Budget + Next Test — compact strips */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
               {(activeAnalysis?.budget_reallocation ?? report.budget_reallocation) && (
                 <div style={{ ...card, padding: '18px', borderLeft: '3px solid #d97706' }}>
