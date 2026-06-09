@@ -105,10 +105,10 @@ const fmtSpend = (n: number) => `$${Math.round(n).toLocaleString('en-US')}`
 const fmt = (n: number | null, pre = '', suf = '', d = 2) => n == null ? '—' : `${pre}${Number(n).toFixed(d)}${suf}`
 const splitBullets = (text: string) => text ? text.split(/(?<=[.!?])\s+(?=[A-Z])/).filter(s => s.trim().length > 10) : []
 
-// Normalise KPI metric names so lookup is robust regardless of Supabase casing
-// e.g. "Blended CPA", "blended cpa", "CPA" all → "cpa"
+// Normalise KPI metric names — strips "blended" and "account" prefixes,
+// handles: "Account CPA", "Blended ROAS", "CPA", "Conversion Rate", etc.
 const normaliseMetric = (m: string): string => {
-  const s = m.toLowerCase().replace(/blended\s*/g, '').trim()
+  const s = m.toLowerCase().replace(/\b(blended|account)\s*/g, '').trim()
   if (s === 'cpa') return 'cpa'
   if (s === 'roas') return 'roas'
   if (s === 'ctr') return 'ctr'
@@ -179,7 +179,6 @@ const DateFilterDropdown = ({
         📅 {isFiltered ? `${dateFrom} → ${dateTo}` : 'Date range'}
         {isFiltered && <span onClick={e => { e.stopPropagation(); onClear() }} style={{ marginLeft: '4px', color: '#2563eb', fontWeight: '700' }}>✕</span>}
       </button>
-
       {open && (
         <div style={{
           position: 'absolute', top: '38px', left: 0, background: '#fff',
@@ -252,9 +251,11 @@ export default function ReportPage() {
   const [filterName, setFilterName] = useState('')
   const [sortKey, setSortKey] = useState<keyof Campaign>('spend')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
-  // Campaign selection state — drives charts/KPI boxes when non-empty
+  // selectedCampaigns = staging (checkboxes); activeCampaignFilter = confirmed scope
   const [selectedCampaigns, setSelectedCampaigns] = useState<Set<string>>(new Set())
+  const [activeCampaignFilter, setActiveCampaignFilter] = useState<Set<string>>(new Set())
   const HEADER_OFFSET = 112
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const sectionRefs = {
     summary: useRef<HTMLDivElement>(null),
@@ -263,6 +264,8 @@ export default function ReportPage() {
     campaigns: useRef<HTMLDivElement>(null),
     actions: useRef<HTMLDivElement>(null),
   }
+
+  // ─── Initial load ────────────────────────────────────────────────────────
 
   useEffect(() => {
     if (!id) return
@@ -286,6 +289,33 @@ export default function ReportPage() {
     }
     load()
   }, [id])
+
+  // ─── Polling for period analyses ─────────────────────────────────────────
+  // Polls every 10s after initial load. Stops when both 7d and 30d are ready,
+  // or after 5 minutes (30 ticks).
+
+  useEffect(() => {
+    if (!id || loading) return
+    let ticks = 0
+    const check = async () => {
+      ticks++
+      const { data: pa } = await supabase
+        .from('report_analyses')
+        .select('*')
+        .eq('report_id', id)
+      if (!pa) return
+      const paMap: Record<string, PeriodAnalysis> = {}
+      for (const row of pa) { paMap[row.period] = row }
+      setPeriodAnalyses(paMap)
+      const both7dReady = paMap['7d']?.status === 'ready'
+      const both30dReady = paMap['30d']?.status === 'ready'
+      if ((both7dReady && both30dReady) || ticks >= 30) {
+        if (pollingRef.current) clearInterval(pollingRef.current)
+      }
+    }
+    pollingRef.current = setInterval(check, 10000)
+    return () => { if (pollingRef.current) clearInterval(pollingRef.current) }
+  }, [id, loading])
 
   const scrollTo = (key: string) => {
     setActiveSection(key)
@@ -313,11 +343,9 @@ export default function ReportPage() {
   const wowStats = useMemo(() => {
     if (!dailyData.length) return null
     const allDates = [...new Set(dailyData.map(d => d.date))].sort()
-    const total = allDates.length
-    if (total < 14) return null
+    if (allDates.length < 14) return null
     const lastWeekDates = new Set(allDates.slice(-7))
     const prevWeekDates = new Set(allDates.slice(-14, -7))
-
     const sum = (dates: Set<string>) => dailyData
       .filter(d => dates.has(d.date))
       .reduce((a, d) => ({
@@ -325,13 +353,10 @@ export default function ReportPage() {
         conversions: a.conversions + Number(d.conversions),
         revenue: a.revenue + Number(d.conversions) * (report?.ltv_per_conversion ?? 180)
       }), { spend: 0, conversions: 0, revenue: 0 })
-
     return { last: sum(lastWeekDates), prev: sum(prevWeekDates) }
   }, [dailyData])
 
-  // ─── Filtered daily (date + objective + goal) ─────────────────────────────
-  // NOTE: filterName (search text) intentionally does NOT filter daily data.
-  // Only explicit campaign selection (selectedCampaigns) scopes charts/KPIs.
+  // ─── Filtered daily (date + objective + goal only) ────────────────────────
 
   const filteredDaily = useMemo(() => dailyData.filter(d => {
     if (dateFrom && d.date < dateFrom) return false
@@ -341,15 +366,14 @@ export default function ReportPage() {
     return true
   }), [dailyData, dateFrom, dateTo, filterObjective, filterGoal])
 
-  // ─── Campaign-scoped daily (applies selection on top of filteredDaily) ────
-  // Used for charts and KPI boxes when user has selected specific campaigns.
+  // ─── Scoped daily (applies activeCampaignFilter on top) ──────────────────
 
   const scopedDaily = useMemo(() => {
-    if (selectedCampaigns.size === 0) return filteredDaily
-    return filteredDaily.filter(d => selectedCampaigns.has(d.campaign_name))
-  }, [filteredDaily, selectedCampaigns])
+    if (activeCampaignFilter.size === 0) return filteredDaily
+    return filteredDaily.filter(d => activeCampaignFilter.has(d.campaign_name))
+  }, [filteredDaily, activeCampaignFilter])
 
-  // ─── Recalc campaigns ────────────────────────────────────────────────────
+  // ─── Recalc campaigns from filteredDaily ────────────────────────────────
 
   const recalcCampaigns = useMemo(() => {
     const ltv = report?.ltv_per_conversion ?? 180
@@ -376,8 +400,10 @@ export default function ReportPage() {
     })
   }, [campaigns, filteredDaily])
 
+  // filteredCampaigns = after text search + verdict + activeCampaignFilter
   const filteredCampaigns = useMemo(() => recalcCampaigns
     .filter(c => {
+      if (activeCampaignFilter.size > 0 && !activeCampaignFilter.has(c.campaign_name)) return false
       if (filterVerdict && c.verdict !== filterVerdict) return false
       if (filterName && !c.campaign_name.toLowerCase().includes(filterName.toLowerCase())) return false
       return true
@@ -386,7 +412,7 @@ export default function ReportPage() {
       const av = (a[sortKey] as number) ?? -Infinity
       const bv = (b[sortKey] as number) ?? -Infinity
       return sortDir === 'desc' ? (bv > av ? 1 : -1) : (av > bv ? 1 : -1)
-    }), [recalcCampaigns, filterVerdict, filterName, sortKey, sortDir])
+    }), [recalcCampaigns, activeCampaignFilter, filterVerdict, filterName, sortKey, sortDir])
 
   // ─── Chart data (uses scopedDaily) ───────────────────────────────────────
 
@@ -464,7 +490,7 @@ export default function ReportPage() {
     }))
   }, [scopedDaily, cpmView])
 
-  // ─── KPI boxes (uses scopedDaily, normalised metric name lookup) ──────────
+  // ─── KPI boxes (scopedDaily + normalised metric lookup) ──────────────────
 
   const filteredKpis = useMemo(() => {
     if (!scopedDaily.length) return kpis
@@ -476,11 +502,8 @@ export default function ReportPage() {
       frequency_sum: a.frequency_sum + Number((d as any).frequency || 0),
       frequency_count: a.frequency_count + (Number((d as any).frequency || 0) > 0 ? 1 : 0),
     }), { spend: 0, impressions: 0, link_clicks: 0, conversions: 0, frequency_sum: 0, frequency_count: 0 })
-
     const ltv = report?.ltv_per_conversion ?? 180
     const revenue = totals.conversions * ltv
-
-    // Keyed by normalised metric name
     const computed: Record<string, number> = {
       cpa: totals.conversions > 0 ? totals.spend / totals.conversions : 0,
       roas: totals.spend > 0 ? (revenue / totals.spend) * 100 : 0,
@@ -488,7 +511,6 @@ export default function ReportPage() {
       conversion_rate: totals.link_clicks > 0 ? (totals.conversions / totals.link_clicks) * 100 : 0,
       frequency: totals.frequency_count > 0 ? totals.frequency_sum / totals.frequency_count : 0,
     }
-
     return kpis.map(k => {
       const key = normaliseMetric(k.metric)
       const val = computed[key]
@@ -534,10 +556,7 @@ export default function ReportPage() {
     if (!activeAnalysis?.kpi_breakdown) return filteredKpis
     const noteMap: Record<string, string> = {}
     for (const k of activeAnalysis.kpi_breakdown) noteMap[k.metric] = k.note
-    return filteredKpis.map(k => ({
-      ...k,
-      note: noteMap[k.metric] ?? k.note
-    }))
+    return filteredKpis.map(k => ({ ...k, note: noteMap[k.metric] ?? k.note }))
   }, [activeAnalysis, filteredKpis])
 
   const isDateFiltered = report && (dateFrom !== report.date_range_start || dateTo !== report.date_range_end)
@@ -551,8 +570,32 @@ export default function ReportPage() {
     })
   }, [filteredCampaigns, activeAnalysis])
 
+  // ─── Subtotal row — always reflects displayCampaigns ─────────────────────
+
+  const subtotal = useMemo(() => {
+    if (!displayCampaigns.length) return null
+    const ltv = report?.ltv_per_conversion ?? 180
+    const t = displayCampaigns.reduce((a, c) => ({
+      spend: a.spend + Number(c.spend),
+      impressions: a.impressions + Number(c.impressions),
+      link_clicks: a.link_clicks + Number(c.link_clicks),
+      conversions: a.conversions + Number(c.conversions),
+    }), { spend: 0, impressions: 0, link_clicks: 0, conversions: 0 })
+    const rev = t.conversions * ltv
+    return {
+      spend: t.spend,
+      conversions: t.conversions,
+      cpa: t.conversions > 0 ? t.spend / t.conversions : null,
+      roas: t.spend > 0 ? rev / t.spend : null,
+      ctr: t.impressions > 0 ? t.link_clicks / t.impressions * 100 : null,
+      conversion_rate: t.link_clicks > 0 ? t.conversions / t.link_clicks * 100 : null,
+      cpm: t.impressions > 0 ? t.spend / t.impressions * 1000 : null,
+    }
+  }, [displayCampaigns, report])
+
   const hasFilters = !!(filterObjective || filterGoal || filterVerdict || filterName || isDateFiltered)
-  const hasCampaignSelection = selectedCampaigns.size > 0
+  const hasCampaignFilter = activeCampaignFilter.size > 0
+  const hasPendingSelection = selectedCampaigns.size > 0
 
   // ─── Campaign selection helpers ───────────────────────────────────────────
 
@@ -584,7 +627,14 @@ export default function ReportPage() {
     }
   }
 
-  const clearCampaignSelection = () => setSelectedCampaigns(new Set())
+  const applySelection = () => {
+    setActiveCampaignFilter(new Set(selectedCampaigns))
+  }
+
+  const clearCampaignFilter = () => {
+    setActiveCampaignFilter(new Set())
+    setSelectedCampaigns(new Set())
+  }
 
   const handleDelete = async () => {
     if (!id) return
@@ -645,41 +695,34 @@ export default function ReportPage() {
       {/* ── Filter Bar ── */}
       <div style={{ background: '#fff', borderBottom: '1px solid #f1f1f4', padding: '10px 28px', position: 'sticky', top: '56px', zIndex: 29 }}>
         <div style={{ maxWidth: '1440px', margin: '0 auto', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' as const }}>
-
           <DateFilterDropdown
             dateFrom={dateFrom} dateTo={dateTo}
             reportStart={report.date_range_start || ''} reportEnd={report.date_range_end || ''}
             onFromChange={setDateFrom} onToChange={setDateTo}
             onPreset={applyPreset} onClear={clearDates}
           />
-
           <div style={{ width: '1px', height: '18px', background: '#e8eaed' }} />
-
           <input placeholder="🔍 Search campaigns..." value={filterName} onChange={e => setFilterName(e.target.value)} style={{ ...filterInput, minWidth: '180px' }} />
-
           {objectives.length > 0 && (
             <select value={filterObjective} onChange={e => setFilterObjective(e.target.value)} style={{ ...filterInput, cursor: 'pointer' }}>
               <option value="">All Objectives</option>
               {objectives.map(o => <option key={o} value={o}>{o}</option>)}
             </select>
           )}
-
           {goals.length > 0 && (
             <select value={filterGoal} onChange={e => setFilterGoal(e.target.value)} style={{ ...filterInput, cursor: 'pointer' }}>
               <option value="">All Goals</option>
               {goals.map(g => <option key={g} value={g}>{g}</option>)}
             </select>
           )}
-
           <select value={filterVerdict} onChange={e => setFilterVerdict(e.target.value)} style={{ ...filterInput, cursor: 'pointer' }}>
             <option value="">All Verdicts</option>
             {['SCALE', 'MAINTAIN', 'OPTIMIZE', 'PAUSE'].map(v => <option key={v} value={v}>{v}</option>)}
           </select>
-
-          {(hasFilters || hasCampaignSelection) && (
+          {(hasFilters || hasCampaignFilter) && (
             <button onClick={() => {
               setFilterObjective(''); setFilterGoal(''); setFilterVerdict(''); setFilterName('')
-              clearDates(); clearCampaignSelection()
+              clearDates(); clearCampaignFilter()
             }} style={{ padding: '6px 12px', borderRadius: '8px', border: '1px solid #fca5a5', background: '#fef2f2', fontSize: '11px', fontWeight: '700', color: '#dc2626', cursor: 'pointer' }}>
               ✕ Clear all
             </button>
@@ -688,9 +731,8 @@ export default function ReportPage() {
       </div>
 
       {/* ── Status Banners ── */}
-      {(hasFilters || hasCampaignSelection || activePeriod !== 'full') && (
+      {(hasFilters || hasCampaignFilter || activePeriod !== 'full') && (
         <>
-          {/* Period / filter banner */}
           {(hasFilters || activePeriod !== 'full') && (
             <div style={{
               borderBottom: '1px solid',
@@ -712,15 +754,14 @@ export default function ReportPage() {
               </div>
             </div>
           )}
-          {/* Campaign selection banner */}
-          {hasCampaignSelection && (
+          {hasCampaignFilter && (
             <div style={{ borderBottom: '1px solid #fed7aa', background: '#fff7ed', padding: '8px 28px' }}>
               <div style={{ maxWidth: '1440px', margin: '0 auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span style={{ fontSize: '13px' }}>🎯</span>
                 <span style={{ fontSize: '12px', fontWeight: '500', color: '#9a3412' }}>
-                  Charts and KPIs scoped to {selectedCampaigns.size} selected campaign{selectedCampaigns.size !== 1 ? 's' : ''}. AI insights are not affected.
+                  Charts and KPIs scoped to {activeCampaignFilter.size} selected campaign{activeCampaignFilter.size !== 1 ? 's' : ''}. AI insights are not affected.
                 </span>
-                <button onClick={clearCampaignSelection} style={{ marginLeft: 'auto', padding: '3px 10px', borderRadius: '6px', border: '1px solid #fdba74', background: '#fff', fontSize: '11px', fontWeight: '700', color: '#c2410c', cursor: 'pointer' }}>
+                <button onClick={clearCampaignFilter} style={{ marginLeft: 'auto', padding: '3px 10px', borderRadius: '6px', border: '1px solid #fdba74', background: '#fff', fontSize: '11px', fontWeight: '700', color: '#c2410c', cursor: 'pointer' }}>
                   Clear selection
                 </button>
               </div>
@@ -761,7 +802,6 @@ export default function ReportPage() {
             <div style={{ height: '1px', background: '#f1f1f4', margin: '16px 0' }} />
             <div style={{ fontSize: '10px', color: '#cbd5e1', wordBreak: 'break-all', lineHeight: '1.5' }}>{report.file_name}</div>
           </div>
-
           {!deleteConfirm ? (
             <button onClick={() => setDeleteConfirm(true)} style={{ width: '100%', padding: '8px', borderRadius: '9px', border: '1px solid #fecaca', background: '#fff', fontSize: '12px', fontWeight: '500', color: '#ef4444', cursor: 'pointer' }}>
               Delete report
@@ -796,8 +836,6 @@ export default function ReportPage() {
                 </div>
               ))}
             </div>
-
-            {/* Executive Summary */}
             <div style={{ ...card, padding: '24px' }}>
               <span style={secLabel}>Executive Summary</span>
               <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -841,7 +879,6 @@ export default function ReportPage() {
             <div ref={sectionRefs.charts}>
               <span style={secLabel}>Performance Trends</span>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
-
                 <div style={{ ...card, padding: '22px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
                     <span style={{ fontSize: '12px', fontWeight: '700', color: '#374151' }}>Spend Trend</span>
@@ -938,7 +975,6 @@ export default function ReportPage() {
                 </div>
               </div>
 
-              {/* Funnel Insight inline below charts */}
               {(activeAnalysis?.funnel_insight ?? report.funnel_insight) && (
                 <div style={{ ...card, padding: '20px', marginTop: '14px', borderLeft: '3px solid #2563eb' }}>
                   <span style={{ ...secLabel, color: '#2563eb' }}>Funnel Insight</span>
@@ -957,30 +993,39 @@ export default function ReportPage() {
 
           {/* ── Campaigns ── */}
           <div ref={sectionRefs.campaigns} style={{ ...card, overflow: 'hidden' }}>
-            <div style={{ padding: '18px 22px', borderBottom: '1px solid #f7f8fa', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ padding: '18px 22px', borderBottom: '1px solid #f7f8fa', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span style={{ fontSize: '13px', fontWeight: '700', color: '#111827' }}>Campaigns</span>
-                <span style={{ fontSize: '11px', fontWeight: '700', color: '#2563eb', background: '#eff6ff', padding: '2px 7px', borderRadius: '10px' }}>{filteredCampaigns.length}</span>
-                {hasCampaignSelection && (
+                <span style={{ fontSize: '11px', fontWeight: '700', color: '#2563eb', background: '#eff6ff', padding: '2px 7px', borderRadius: '10px' }}>{displayCampaigns.length}</span>
+                {hasCampaignFilter && (
                   <span style={{ fontSize: '11px', fontWeight: '700', color: '#c2410c', background: '#fff7ed', border: '1px solid #fed7aa', padding: '2px 7px', borderRadius: '10px' }}>
-                    {selectedCampaigns.size} selected
+                    {activeCampaignFilter.size} filtered
                   </span>
                 )}
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                {hasCampaignSelection && (
-                  <button onClick={clearCampaignSelection} style={{ fontSize: '11px', fontWeight: '600', color: '#c2410c', background: 'none', border: 'none', cursor: 'pointer', padding: '0' }}>
-                    Clear selection
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {/* Pending selection action button */}
+                {hasPendingSelection && (
+                  <button onClick={applySelection} style={{
+                    padding: '5px 12px', borderRadius: '7px', border: 'none',
+                    background: '#2563eb', color: '#fff', fontSize: '11px', fontWeight: '700', cursor: 'pointer'
+                  }}>
+                    Filter to {selectedCampaigns.size} selected
                   </button>
                 )}
-                <span style={{ fontSize: '11px', color: '#9ca3af' }}>Click row to expand · Checkbox to scope charts</span>
+                {hasCampaignFilter && (
+                  <button onClick={clearCampaignFilter} style={{ fontSize: '11px', fontWeight: '600', color: '#c2410c', background: 'none', border: 'none', cursor: 'pointer' }}>
+                    Clear filter
+                  </button>
+                )}
+                <span style={{ fontSize: '11px', color: '#9ca3af' }}>Click row to expand</span>
               </div>
             </div>
+
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
                 <thead>
                   <tr style={{ background: '#f9fafb' }}>
-                    {/* Checkbox column header */}
                     <th style={{ padding: '11px 14px', width: '36px', borderBottom: '1px solid #f1f1f4' }}>
                       <input
                         type="checkbox"
@@ -1027,30 +1072,22 @@ export default function ReportPage() {
                 <tbody>
                   {displayCampaigns.map((c, i) => {
                     const isSelected = selectedCampaigns.has(c.campaign_name)
+                    const isFiltered = activeCampaignFilter.has(c.campaign_name)
                     const isExpanded = expandedRow === c.campaign_name
-                    const rowBg = isSelected
-                      ? '#fff7ed'
-                      : isExpanded
-                      ? '#f0f7ff'
-                      : i % 2 === 0 ? '#fff' : '#fafafa'
+                    const rowBg = isSelected ? '#eff6ff' : isFiltered ? '#fff7ed' : isExpanded ? '#f0f7ff' : i % 2 === 0 ? '#fff' : '#fafafa'
                     return (
                       <>
                         <tr key={c.campaign_name}
                           style={{ borderTop: '1px solid #f7f8fa', background: rowBg, cursor: 'pointer' }}
-                          onMouseEnter={e => { if (!isSelected && !isExpanded) e.currentTarget.style.background = '#f8faff' }}
-                          onMouseLeave={e => { if (!isSelected && !isExpanded) e.currentTarget.style.background = rowBg }}>
-                          {/* Checkbox cell — stops row expand propagation */}
+                          onMouseEnter={e => { if (!isSelected && !isFiltered && !isExpanded) e.currentTarget.style.background = '#f8faff' }}
+                          onMouseLeave={e => { if (!isSelected && !isFiltered && !isExpanded) e.currentTarget.style.background = rowBg }}>
                           <td style={{ padding: '11px 14px' }} onClick={e => e.stopPropagation()}>
-                            <input
-                              type="checkbox"
-                              checked={isSelected}
-                              onChange={() => toggleCampaign(c.campaign_name)}
-                              style={{ cursor: 'pointer', width: '14px', height: '14px', accentColor: '#2563eb' }}
-                            />
+                            <input type="checkbox" checked={isSelected} onChange={() => toggleCampaign(c.campaign_name)}
+                              style={{ cursor: 'pointer', width: '14px', height: '14px', accentColor: '#2563eb' }} />
                           </td>
                           <td style={{ padding: '11px 14px', maxWidth: '180px' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>
                             <div style={{ fontWeight: '600', color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }} title={c.campaign_name}>
-                              {isSelected && <div style={{ width: '5px', height: '5px', borderRadius: '50%', background: '#c2410c', flexShrink: 0 }} />}
+                              {isFiltered && <div style={{ width: '5px', height: '5px', borderRadius: '50%', background: '#c2410c', flexShrink: 0 }} />}
                               {c.campaign_name}
                             </div>
                           </td>
@@ -1086,6 +1123,29 @@ export default function ReportPage() {
                     )
                   })}
                 </tbody>
+
+                {/* ── Subtotal row — always visible, reflects table contents ── */}
+                {subtotal && (
+                  <tfoot>
+                    <tr style={{ background: '#f1f5f9', borderTop: '2px solid #e2e8f0' }}>
+                      <td style={{ padding: '10px 14px' }} />
+                      <td style={{ padding: '10px 14px' }}>
+                        <span style={{ fontSize: '10px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '0.8px', color: '#475569' }}>
+                          Subtotal ({displayCampaigns.length})
+                        </span>
+                      </td>
+                      <td colSpan={2} style={{ padding: '10px 14px' }} />
+                      <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '800', color: '#111827' }}>{fmtSpend(subtotal.spend)}</td>
+                      <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{subtotal.conversions.toLocaleString()}</td>
+                      <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{fmt(subtotal.cpa, '$')}</td>
+                      <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{subtotal.roas != null ? `${(subtotal.roas * 100).toFixed(0)}%` : '—'}</td>
+                      <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{fmt(subtotal.ctr, '', '%')}</td>
+                      <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{fmt(subtotal.conversion_rate, '', '%')}</td>
+                      <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{fmt(subtotal.cpm, '$')}</td>
+                      <td colSpan={2} style={{ padding: '10px 14px' }} />
+                    </tr>
+                  </tfoot>
+                )}
               </table>
             </div>
           </div>
@@ -1093,7 +1153,6 @@ export default function ReportPage() {
           {/* ── Action Plan ── */}
           <div ref={sectionRefs.actions}>
             <span style={secLabel}>Action Plan</span>
-
             <div style={{ ...card, padding: '22px', marginBottom: '14px', borderLeft: '4px solid #dc2626' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
                 <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#dc2626' }} />
@@ -1109,7 +1168,6 @@ export default function ReportPage() {
                 ))}
               </div>
             </div>
-
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '14px' }}>
               {[
                 { label: 'This Week', key: 'this_week', color: '#d97706', dot: '#fcd34d' },
@@ -1131,7 +1189,6 @@ export default function ReportPage() {
                 </div>
               ))}
             </div>
-
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
               {(activeAnalysis?.budget_reallocation ?? report.budget_reallocation) && (
                 <div style={{ ...card, padding: '18px', borderLeft: '3px solid #d97706' }}>
