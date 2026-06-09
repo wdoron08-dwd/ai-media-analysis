@@ -470,8 +470,10 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
     if (!report?.date_range_end || !dateFrom) return 'full'
     const [ey, em, ed] = report.date_range_end.split('-').map(Number)
     const endMs = Date.UTC(ey, em - 1, ed)
-    const cutoff7d = new Date(endMs - 6 * 86400000).toISOString().split('T')[0]
-    const cutoff30d = new Date(endMs - 29 * 86400000).toISOString().split('T')[0]
+    const c7d = new Date(endMs - 6 * 86400000)
+    const cutoff7d = `${c7d.getUTCFullYear()}-${String(c7d.getUTCMonth()+1).padStart(2,'0')}-${String(c7d.getUTCDate()).padStart(2,'0')}`
+    const c30d = new Date(endMs - 29 * 86400000)
+    const cutoff30d = `${c30d.getUTCFullYear()}-${String(c30d.getUTCMonth()+1).padStart(2,'0')}-${String(c30d.getUTCDate()).padStart(2,'0')}`
     if (dateFrom === cutoff7d && dateTo === report.date_range_end) return '7d'
     if (dateFrom === cutoff30d && dateTo === report.date_range_end) return '30d'
     return 'full'
