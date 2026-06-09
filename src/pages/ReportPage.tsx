@@ -463,10 +463,7 @@ setPeriodAnalyses(paMap)
       : k.status
   }))
 }, [kpis, filteredDaily])
-const displayKpis = useMemo(() => {
-    if (activeAnalysis?.kpi_breakdown) return activeAnalysis.kpi_breakdown
-    return filteredKpis
-  }, [activeAnalysis, filteredKpis])  
+ 
 const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).filter(Boolean))] as string[], [dailyData])
   const goals = useMemo(() => [...new Set(dailyData.map(d => d.performance_goal).filter(Boolean))] as string[], [dailyData])
   const activePeriod = useMemo(() => {
@@ -492,6 +489,10 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
     const pa = periodAnalyses[activePeriod]
     return !pa || pa.status === 'pending'
   }, [activePeriod, periodAnalyses])
+  const displayKpis = useMemo(() => {
+    if (activeAnalysis?.kpi_breakdown) return activeAnalysis.kpi_breakdown
+    return filteredKpis
+  }, [activeAnalysis, filteredKpis])
   const isDateFiltered = report && (dateFrom !== report.date_range_start || dateTo !== report.date_range_end)
   const displayCampaigns = useMemo(() => {
     if (!activeAnalysis?.campaigns) return filteredCampaigns
