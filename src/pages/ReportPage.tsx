@@ -99,6 +99,7 @@ const sc = (s: string) => s === 'ON_TRACK' ? '#16a34a' : s === 'AT_RISK' ? '#d97
 const vc = (v: string) => v === 'SCALE' ? '#16a34a' : v === 'MAINTAIN' ? '#2563eb' : v === 'OPTIMIZE' ? '#d97706' : '#dc2626'
 const vbg = (v: string) => v === 'SCALE' ? '#f0fdf4' : v === 'MAINTAIN' ? '#eff6ff' : v === 'OPTIMIZE' ? '#fffbeb' : '#fef2f2'
 const fmtM = (n: number) => n >= 1e6 ? `$${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `$${(n / 1e3).toFixed(0)}K` : `$${n.toFixed(0)}`
+const fmtSpend = (n: number) => `$${Math.round(n).toLocaleString('en-US')}`
 const fmt = (n: number | null, pre = '', suf = '', d = 2) => n == null ? '—' : `${pre}${Number(n).toFixed(d)}${suf}`
 const splitBullets = (text: string) => text ? text.split(/(?<=[.!?])\s+(?=[A-Z])/).filter(s => s.trim().length > 10) : []
 
@@ -492,8 +493,13 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
     return !pa || pa.status === 'pending'
   }, [activePeriod, periodAnalyses])
   const displayKpis = useMemo(() => {
-    if (activeAnalysis?.kpi_breakdown) return activeAnalysis.kpi_breakdown
-    return filteredKpis
+    if (!activeAnalysis?.kpi_breakdown) return filteredKpis
+    const noteMap: Record<string, string> = {}
+    for (const k of activeAnalysis.kpi_breakdown) noteMap[k.metric] = k.note
+    return filteredKpis.map(k => ({
+      ...k,
+      note: noteMap[k.metric] ?? k.note
+    }))
   }, [activeAnalysis, filteredKpis])
   const isDateFiltered = report && (dateFrom !== report.date_range_start || dateTo !== report.date_range_end)
   const displayCampaigns = useMemo(() => {
@@ -621,7 +627,7 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
             </span>
             <span style={{ fontSize: '12px', fontWeight: '500', color: activePeriod !== 'full' && !isPeriodPending ? '#1e40af' : '#92400e' }}>
               {activePeriod !== 'full' && !isPeriodPending
-                ? `Showing ${activePeriod === '7d' ? '7-day' : '30-day'} AI insights. Charts and campaign metrics reflect your date filter.`
+                ? `Showing ${activePeriod === '7d' ? '7-day' : '30-day'} AI insights.${hasFilters ? ' Additional filters affect charts and metrics only.' : ' Charts and campaign metrics reflect your date filter.'}`
                 : activePeriod !== 'full' && isPeriodPending
                 ? `AI insights for this period are being prepared — showing full report insights for now.`
                 : 'Insights reflect the full report period. Charts and table reflect your active filters.'}
@@ -916,7 +922,7 @@ const objectives = useMemo(() => [...new Set(dailyData.map(d => d.objective).fil
                         </td>
                         <td style={{ padding: '11px 14px', color: '#64748b' }}>{c.objective || '—'}</td>
                         <td style={{ padding: '11px 14px', color: '#64748b' }}>{c.performance_goal || '—'}</td>
-                        <td style={{ padding: '11px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{fmtM(Number(c.spend))}</td>
+                        <td style={{ padding: '11px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{fmtSpend(Number(c.spend))}</td>
                         <td style={{ padding: '11px 14px', fontFamily: 'monospace' }}>{c.conversions.toLocaleString()}</td>
                         <td style={{ padding: '11px 14px', fontFamily: 'monospace' }}>{fmt(c.cpa, '$')}</td>
                         <td style={{ padding: '11px 14px', fontFamily: 'monospace' }}>{c.roas != null ? `${(Number(c.roas) * 100).toFixed(0)}%` : '—'}</td>
