@@ -9,7 +9,6 @@ interface ClientProfile {
   column_mapping: Record<string, string>
   conversion_label: string
   secondary_label: string | null
-  ltv_per_conversion: number
   kpi_targets: Record<string, number>
 }
 
@@ -22,7 +21,6 @@ interface FormData {
   columnMap: Record<string, string>
   conversionLabel: string
   secondaryLabel: string
-  ltvPerConversion: string
   kpiTargets: {
     cpa: string
     conversion_rate: string
@@ -50,6 +48,7 @@ const REQUIRED_FIELDS = [
 ]
 
 const OPTIONAL_FIELDS = [
+  { key: 'revenue', label: 'Revenue', required: false },
   { key: 'secondary_funnel_event', label: 'Secondary Funnel Event', required: false },
   { key: 'frequency', label: 'Frequency', required: false },
   { key: 'date', label: 'Date', required: false },
@@ -81,7 +80,6 @@ export default function UploadPage() {
     columnMap: {},
     conversionLabel: '',
     secondaryLabel: '',
-    ltvPerConversion: '',
     kpiTargets: { cpa: '', conversion_rate: '', ctr: '', roas: '', max_frequency: '' },
     saveToProfile: false,
   })
@@ -95,6 +93,8 @@ export default function UploadPage() {
   const update = (fields: Partial<FormData>) =>
     setFormData(prev => ({ ...prev, ...fields }))
 
+  const hasRevenue = !!formData.columnMap['revenue']
+
   const loadProfile = (profile: ClientProfile) => {
     update({
       clientId: profile.id,
@@ -102,7 +102,6 @@ export default function UploadPage() {
       columnMap: profile.column_mapping || {},
       conversionLabel: profile.conversion_label || '',
       secondaryLabel: profile.secondary_label || '',
-      ltvPerConversion: profile.ltv_per_conversion?.toString() || '',
       kpiTargets: {
         cpa: profile.kpi_targets?.cpa?.toString() || '',
         conversion_rate: profile.kpi_targets?.conversion_rate?.toString() || '',
@@ -113,22 +112,22 @@ export default function UploadPage() {
     })
   }
 
-  const calculateAccountAverages = (data: Record<string, unknown>[], map: Record<string, string>, ltv: number) => {
+  const calculateAccountAverages = (data: Record<string, unknown>[], map: Record<string, string>) => {
     const get = (row: Record<string, unknown>, key: string) => parseFloat(row[map[key]] as string) || 0
-    const totals = data.reduce((acc: { spend: number; impressions: number; link_clicks: number; conversions: number; frequency: number }, row) => ({
+    const totals = data.reduce((acc: { spend: number; impressions: number; link_clicks: number; conversions: number; revenue: number; frequency: number }, row) => ({
       spend: acc.spend + get(row, 'spend'),
       impressions: acc.impressions + get(row, 'impressions'),
       link_clicks: acc.link_clicks + get(row, 'link_clicks'),
       conversions: acc.conversions + get(row, 'conversions'),
+      revenue: acc.revenue + (map['revenue'] ? get(row, 'revenue') : 0),
       frequency: acc.frequency + get(row, 'frequency'),
-    }), { spend: 0, impressions: 0, link_clicks: 0, conversions: 0, frequency: 0 })
+    }), { spend: 0, impressions: 0, link_clicks: 0, conversions: 0, revenue: 0, frequency: 0 })
 
-    const revenue = totals.conversions * ltv
     setAccountAverages({
       cpa: totals.conversions > 0 ? totals.spend / totals.conversions : null,
       conversion_rate: totals.link_clicks > 0 ? (totals.conversions / totals.link_clicks) * 100 : null,
       ctr: totals.impressions > 0 ? (totals.link_clicks / totals.impressions) * 100 : null,
-      roas: totals.spend > 0 ? revenue / totals.spend : null,
+      roas: map['revenue'] && totals.spend > 0 ? totals.revenue / totals.spend : null,
       frequency: map['frequency'] ? totals.frequency / data.length : null,
     })
   }
@@ -154,6 +153,7 @@ export default function UploadPage() {
           impressions: ['impressions'],
           link_clicks: ['linkclicks', 'linkclick'],
           conversions: ['conversions', 'results'],
+          revenue: ['revenue', 'revenueamount', 'conversionvalue', 'purchasevalue'],
           secondary_funnel_event: ['denied', 'rejected', 'secondary', 'failed'],
           frequency: ['frequency'],
           date: ['date', 'day'],
@@ -187,7 +187,15 @@ export default function UploadPage() {
       setProgress('Calculating KPIs across all campaigns...')
       await new Promise(r => setTimeout(r, 400))
 
-      const ltv = parseFloat(formData.ltvPerConversion)
+      const kpiTargets: Record<string, number> = {
+        cpa: parseFloat(formData.kpiTargets.cpa),
+        conversion_rate: parseFloat(formData.kpiTargets.conversion_rate),
+        ctr: parseFloat(formData.kpiTargets.ctr),
+        max_frequency: parseFloat(formData.kpiTargets.max_frequency),
+      }
+      if (hasRevenue && formData.kpiTargets.roas) {
+        kpiTargets.roas = parseFloat(formData.kpiTargets.roas)
+      }
 
       const payload = {
         rows: rawData,
@@ -195,15 +203,9 @@ export default function UploadPage() {
         conversion_config: {
           conversion_label: formData.conversionLabel,
           secondary_label: formData.secondaryLabel || null,
-          ltv_per_conversion: ltv,
+          has_revenue: hasRevenue,
         },
-        kpi_targets: {
-          cpa: parseFloat(formData.kpiTargets.cpa),
-          conversion_rate: parseFloat(formData.kpiTargets.conversion_rate),
-          ctr: parseFloat(formData.kpiTargets.ctr),
-          roas: parseFloat(formData.kpiTargets.roas),
-          max_frequency: parseFloat(formData.kpiTargets.max_frequency),
-        },
+        kpi_targets: kpiTargets,
         client_id: formData.clientId,
         client_name: formData.clientName,
         save_to_profile: formData.saveToProfile,
@@ -281,6 +283,19 @@ export default function UploadPage() {
     cursor: 'pointer',
   }
 
+  // Step 4 KPI fields — ROAS only shown when revenue column is mapped
+  const kpiFields = [
+    { label: 'CPA Target ($)', key: 'cpa', placeholder: 'e.g. 55', avg: accountAverages.cpa, prefix: '$', suffix: '' },
+    { label: 'Conversion Rate (%)', key: 'conversion_rate', placeholder: 'e.g. 0.65', avg: accountAverages.conversion_rate, prefix: '', suffix: '%' },
+    { label: 'CTR (%)', key: 'ctr', placeholder: 'e.g. 0.9', avg: accountAverages.ctr, prefix: '', suffix: '%' },
+    ...(hasRevenue ? [{ label: 'ROAS Target (%)', key: 'roas', placeholder: 'e.g. 90', avg: accountAverages.roas ? accountAverages.roas * 100 : null, prefix: '', suffix: '%' }] : []),
+    { label: 'Max Frequency', key: 'max_frequency', placeholder: 'e.g. 3.0', avg: accountAverages.frequency, prefix: '', suffix: '' },
+  ]
+
+  // Step 4 continue disabled — ROAS only required when revenue mapped
+  const requiredTargetKeys = ['cpa', 'conversion_rate', 'ctr', 'max_frequency', ...(hasRevenue ? ['roas'] : [])]
+  const step4Disabled = requiredTargetKeys.some(k => !formData.kpiTargets[k as keyof typeof formData.kpiTargets])
+
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg-primary)' }}>
 
@@ -343,7 +358,7 @@ export default function UploadPage() {
                   onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border)')}>
                   <div style={{ fontWeight: '600', fontSize: '14px' }}>{p.client_name}</div>
                   <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                    CPA target: ${p.kpi_targets?.cpa} · LTV: ${p.ltv_per_conversion}
+                    CPA target: ${p.kpi_targets?.cpa}
                   </div>
                 </button>
               ))}
@@ -429,7 +444,12 @@ export default function UploadPage() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 {OPTIONAL_FIELDS.map(field => (
                   <div key={field.key} style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-                    <div style={{ width: '180px', fontSize: '13px', color: 'var(--text-secondary)', flexShrink: 0 }}>{field.label}</div>
+                    <div style={{ width: '180px', fontSize: '13px', color: 'var(--text-secondary)', flexShrink: 0 }}>
+                      {field.label}
+                      {field.key === 'revenue' && (
+                        <span style={{ display: 'block', fontSize: '11px', color: 'var(--blue)', marginTop: '2px' }}>Enables ROAS analysis</span>
+                      )}
+                    </div>
                     <select style={selectStyle} value={formData.columnMap[field.key] || ''}
                       onChange={e => update({ columnMap: { ...formData.columnMap, [field.key]: e.target.value } })}>
                       <option value="">Not in my file</option>
@@ -457,17 +477,12 @@ export default function UploadPage() {
             <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '24px' }}>Define what a conversion means for this client.</p>
             <div style={cardStyle}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                {[
-                  { label: 'Conversion event label', key: 'conversionLabel', placeholder: 'e.g. Credit Card Approval' },
-                  { label: 'LTV per conversion ($)', key: 'ltvPerConversion', placeholder: 'e.g. 180' },
-                ].map(({ label, key, placeholder }) => (
-                  <div key={key}>
-                    <label style={{ display: 'block', fontSize: '13px', fontWeight: '500', marginBottom: '6px' }}>{label}</label>
-                    <input style={inputStyle} placeholder={placeholder}
-                      value={formData[key as keyof FormData] as string}
-                      onChange={e => update({ [key]: e.target.value })} />
-                  </div>
-                ))}
+                <div>
+                  <label style={{ display: 'block', fontSize: '13px', fontWeight: '500', marginBottom: '6px' }}>Conversion event label</label>
+                  <input style={inputStyle} placeholder="e.g. Credit Card Approval"
+                    value={formData.conversionLabel}
+                    onChange={e => update({ conversionLabel: e.target.value })} />
+                </div>
                 {formData.columnMap['secondary_funnel_event'] && (
                   <div>
                     <label style={{ display: 'block', fontSize: '13px', fontWeight: '500', marginBottom: '6px' }}>Secondary event label</label>
@@ -482,13 +497,11 @@ export default function UploadPage() {
               <button onClick={() => setCurrentStep(2)} style={ghostBtn}>← Back</button>
               <button
                 onClick={() => {
-                  if (formData.ltvPerConversion) {
-                    calculateAccountAverages(rawData, formData.columnMap, parseFloat(formData.ltvPerConversion))
-                    setCurrentStep(4)
-                  }
+                  calculateAccountAverages(rawData, formData.columnMap)
+                  setCurrentStep(4)
                 }}
-                disabled={!formData.conversionLabel || !formData.ltvPerConversion}
-                style={{ ...primaryBtn, opacity: (!formData.conversionLabel || !formData.ltvPerConversion) ? 0.4 : 1 }}>
+                disabled={!formData.conversionLabel}
+                style={{ ...primaryBtn, opacity: !formData.conversionLabel ? 0.4 : 1 }}>
                 Continue →
               </button>
             </div>
@@ -502,15 +515,14 @@ export default function UploadPage() {
             <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '24px' }}>
               Set performance targets. Your account averages are shown for reference.
             </p>
+            {!hasRevenue && (
+              <div style={{ marginBottom: '16px', padding: '10px 14px', borderRadius: '8px', background: '#fffbeb', border: '1px solid #fcd34d', fontSize: '13px', color: '#92400e' }}>
+                No revenue column mapped — ROAS analysis disabled. Analysis will focus on CPA, CTR, and conversion rate.
+              </div>
+            )}
             <div style={cardStyle}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                {[
-                  { label: 'CPA Target ($)', key: 'cpa', placeholder: 'e.g. 55', avg: accountAverages.cpa, prefix: '$', suffix: '' },
-                  { label: 'Conversion Rate (%)', key: 'conversion_rate', placeholder: 'e.g. 0.65', avg: accountAverages.conversion_rate, prefix: '', suffix: '%' },
-                  { label: 'CTR (%)', key: 'ctr', placeholder: 'e.g. 0.9', avg: accountAverages.ctr, prefix: '', suffix: '%' },
-                  { label: 'ROAS Target (%)', key: 'roas', placeholder: 'e.g. 300', avg: accountAverages.roas ? accountAverages.roas * 100 : null, prefix: '', suffix: '%' },
-                  { label: 'Max Frequency', key: 'max_frequency', placeholder: 'e.g. 3.0', avg: accountAverages.frequency, prefix: '', suffix: '' },
-                ].map(({ label, key, placeholder, avg, prefix, suffix }) => (
+                {kpiFields.map(({ label, key, placeholder, avg, prefix, suffix }) => (
                   <div key={key}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
                       <label style={{ fontSize: '13px', fontWeight: '500' }}>{label}</label>
@@ -539,8 +551,8 @@ export default function UploadPage() {
             <div style={{ display: 'flex', gap: '8px', marginTop: '24px' }}>
               <button onClick={() => setCurrentStep(3)} style={ghostBtn}>← Back</button>
               <button onClick={() => setCurrentStep(5)}
-                disabled={Object.values(formData.kpiTargets).some(v => !v)}
-                style={{ ...primaryBtn, opacity: Object.values(formData.kpiTargets).some(v => !v) ? 0.4 : 1 }}>
+                disabled={step4Disabled}
+                style={{ ...primaryBtn, opacity: step4Disabled ? 0.4 : 1 }}>
                 Continue →
               </button>
             </div>
@@ -558,7 +570,8 @@ export default function UploadPage() {
                 { label: 'File', value: formData.file?.name },
                 { label: 'Rows', value: formData.rowCount.toString() },
                 { label: 'CPA Target', value: `$${formData.kpiTargets.cpa}` },
-                { label: 'ROAS Target', value: `${formData.kpiTargets.roas}%` },
+                ...(hasRevenue ? [{ label: 'ROAS Target', value: `${formData.kpiTargets.roas}%` }] : []),
+                { label: 'Revenue Data', value: hasRevenue ? '✓ Mapped' : 'Not available' },
               ].map(({ label, value }) => (
                 <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
                   <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{label}</span>
