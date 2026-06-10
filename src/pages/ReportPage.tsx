@@ -25,9 +25,9 @@ interface Report {
   next_test: string
   total_spend: number
   total_conversions: number
-  total_simulated_revenue: number
+  total_revenue: number | null
+  has_revenue: boolean
   kpi_targets: Record<string, number>
-  ltv_per_conversion: number
   data_quality: Record<string, boolean | string | number | null>
 }
 
@@ -351,7 +351,7 @@ export default function ReportPage() {
       .reduce((a, d) => ({
         spend: a.spend + Number(d.spend),
         conversions: a.conversions + Number(d.conversions),
-        revenue: a.revenue + Number(d.conversions) * (report?.ltv_per_conversion ?? 180)
+        revenue: a.revenue + (d.roas != null ? Number(d.roas) * Number(d.spend) : 0)
       }), { spend: 0, conversions: 0, revenue: 0 })
     return { last: sum(lastWeekDates), prev: sum(prevWeekDates) }
   }, [dailyData])
@@ -376,29 +376,28 @@ export default function ReportPage() {
   // ─── Recalc campaigns from filteredDaily ────────────────────────────────
 
   const recalcCampaigns = useMemo(() => {
-    const ltv = report?.ltv_per_conversion ?? 180
-    const byName: Record<string, { spend: number; impressions: number; link_clicks: number; conversions: number; secondary_events: number }> = {}
+    const byName: Record<string, { spend: number; impressions: number; link_clicks: number; conversions: number; secondary_events: number; revenue: number }> = {}
     filteredDaily.forEach(d => {
-      if (!byName[d.campaign_name]) byName[d.campaign_name] = { spend: 0, impressions: 0, link_clicks: 0, conversions: 0, secondary_events: 0 }
+      if (!byName[d.campaign_name]) byName[d.campaign_name] = { spend: 0, impressions: 0, link_clicks: 0, conversions: 0, secondary_events: 0, revenue: 0 }
       byName[d.campaign_name].spend += Number(d.spend)
       byName[d.campaign_name].impressions += Number(d.impressions)
       byName[d.campaign_name].link_clicks += Number(d.link_clicks)
       byName[d.campaign_name].conversions += Number(d.conversions)
       byName[d.campaign_name].secondary_events += Number(d.secondary_events || 0)
+      byName[d.campaign_name].revenue += d.roas != null ? Number(d.roas) * Number(d.spend) : 0
     })
     return campaigns.filter(c => byName[c.campaign_name]).map(c => {
       const r = byName[c.campaign_name]
-      const rev = r.conversions * ltv
       return {
         ...c, spend: r.spend, impressions: r.impressions, link_clicks: r.link_clicks, conversions: r.conversions,
-        roas: r.spend > 0 ? rev / r.spend : null,
+        roas: report?.has_revenue && r.spend > 0 ? r.revenue / r.spend : null,
         cpa: r.conversions > 0 ? r.spend / r.conversions : null,
         ctr: r.impressions > 0 ? r.link_clicks / r.impressions * 100 : null,
         conversion_rate: r.link_clicks > 0 ? r.conversions / r.link_clicks * 100 : null,
         cpm: r.impressions > 0 ? r.spend / r.impressions * 1000 : null,
       }
     })
-  }, [campaigns, filteredDaily])
+  }, [campaigns, filteredDaily, report])
 
   // filteredCampaigns = after text search + verdict + activeCampaignFilter
   const filteredCampaigns = useMemo(() => recalcCampaigns
@@ -470,7 +469,6 @@ export default function ReportPage() {
   }, [scopedDaily, ctrView])
 
   const cpmRoasData = useMemo(() => {
-    const ltv = report?.ltv_per_conversion ?? 180
     const bucket = (d: DailyRow) => {
       if (cpmView === 'daily') return d.date
       const dt = new Date(d.date), day = dt.getDay()
@@ -481,14 +479,15 @@ export default function ReportPage() {
     scopedDaily.forEach(d => {
       const k = bucket(d)
       if (!m[k]) m[k] = { imp: 0, spend: 0, rev: 0 }
-      m[k].imp += Number(d.impressions); m[k].spend += Number(d.spend); m[k].rev += Number(d.conversions) * ltv
+      m[k].imp += Number(d.impressions); m[k].spend += Number(d.spend)
+      m[k].rev += d.roas != null ? Number(d.roas) * Number(d.spend) : 0
     })
     return Object.entries(m).sort(([a], [b]) => a.localeCompare(b)).map(([date, v]) => ({
       date,
       cpm: v.imp > 0 ? Number((v.spend / v.imp * 1000).toFixed(2)) : null,
-      roas_pct: v.spend > 0 ? Math.round(v.rev / v.spend * 100) : null,
+      roas_pct: report?.has_revenue && v.spend > 0 ? Math.round(v.rev / v.spend * 100) : null,
     }))
-  }, [scopedDaily, cpmView])
+  }, [scopedDaily, cpmView, report])
 
   // ─── KPI boxes (scopedDaily + normalised metric lookup) ──────────────────
 
@@ -499,20 +498,22 @@ export default function ReportPage() {
       impressions: a.impressions + Number(d.impressions),
       link_clicks: a.link_clicks + Number(d.link_clicks),
       conversions: a.conversions + Number(d.conversions),
+      revenue: a.revenue + (d.roas != null ? Number(d.roas) * Number(d.spend) : 0),
       frequency_sum: a.frequency_sum + Number((d as any).frequency || 0),
       frequency_count: a.frequency_count + (Number((d as any).frequency || 0) > 0 ? 1 : 0),
-    }), { spend: 0, impressions: 0, link_clicks: 0, conversions: 0, frequency_sum: 0, frequency_count: 0 })
-    const ltv = report?.ltv_per_conversion ?? 180
-    const revenue = totals.conversions * ltv
+    }), { spend: 0, impressions: 0, link_clicks: 0, conversions: 0, revenue: 0, frequency_sum: 0, frequency_count: 0 })
     const computed: Record<string, number> = {
       cpa: totals.conversions > 0 ? totals.spend / totals.conversions : 0,
-      roas: totals.spend > 0 ? (revenue / totals.spend) * 100 : 0,
       ctr: totals.impressions > 0 ? (totals.link_clicks / totals.impressions) * 100 : 0,
       conversion_rate: totals.link_clicks > 0 ? (totals.conversions / totals.link_clicks) * 100 : 0,
       frequency: totals.frequency_count > 0 ? totals.frequency_sum / totals.frequency_count : 0,
     }
+    if (report?.has_revenue) {
+      computed.roas = totals.spend > 0 ? (totals.revenue / totals.spend) * 100 : 0
+    }
     return kpis.map(k => {
       const key = normaliseMetric(k.metric)
+      if (key === 'roas' && !report?.has_revenue) return k
       const val = computed[key]
       if (val === undefined) return k
       const isInverse = key === 'cpa' || key === 'frequency'
@@ -574,19 +575,18 @@ export default function ReportPage() {
 
   const subtotal = useMemo(() => {
     if (!displayCampaigns.length) return null
-    const ltv = report?.ltv_per_conversion ?? 180
     const t = displayCampaigns.reduce((a, c) => ({
       spend: a.spend + Number(c.spend),
       impressions: a.impressions + Number(c.impressions),
       link_clicks: a.link_clicks + Number(c.link_clicks),
       conversions: a.conversions + Number(c.conversions),
-    }), { spend: 0, impressions: 0, link_clicks: 0, conversions: 0 })
-    const rev = t.conversions * ltv
+      revenue: a.revenue + (c.roas != null ? Number(c.roas) * Number(c.spend) : 0),
+    }), { spend: 0, impressions: 0, link_clicks: 0, conversions: 0, revenue: 0 })
     return {
       spend: t.spend,
       conversions: t.conversions,
       cpa: t.conversions > 0 ? t.spend / t.conversions : null,
-      roas: t.spend > 0 ? rev / t.spend : null,
+      roas: report?.has_revenue && t.spend > 0 ? t.revenue / t.spend : null,
       ctr: t.impressions > 0 ? t.link_clicks / t.impressions * 100 : null,
       conversion_rate: t.link_clicks > 0 ? t.conversions / t.link_clicks * 100 : null,
       cpm: t.impressions > 0 ? t.spend / t.impressions * 1000 : null,
@@ -827,7 +827,7 @@ export default function ReportPage() {
               {[
                 { label: 'Total Spend', value: fmtM(report.total_spend), wow: wowStats ? { current: wowStats.last.spend, previous: wowStats.prev.spend, inverse: false } : null },
                 { label: 'Total Conversions', value: report.total_conversions.toLocaleString(), wow: wowStats ? { current: wowStats.last.conversions, previous: wowStats.prev.conversions, inverse: false } : null },
-                { label: 'Simulated Revenue', value: fmtM(report.total_simulated_revenue), wow: wowStats ? { current: wowStats.last.revenue, previous: wowStats.prev.revenue, inverse: false } : null },
+                ...(report.has_revenue ? [{ label: 'Total Revenue', value: fmtM(report.total_revenue ?? 0), wow: wowStats ? { current: wowStats.last.revenue, previous: wowStats.prev.revenue, inverse: false } : null }] : []),
               ].map(({ label, value, wow }) => (
                 <div key={label} style={{ ...card, padding: '20px 24px' }}>
                   <div style={{ fontSize: '11px', color: '#9ca3af', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: '10px' }}>{label}</div>
@@ -953,7 +953,7 @@ export default function ReportPage() {
 
                 <div style={{ ...card, padding: '22px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
-                    <span style={{ fontSize: '12px', fontWeight: '700', color: '#374151' }}>CPM vs ROAS %</span>
+                    <span style={{ fontSize: '12px', fontWeight: '700', color: '#374151' }}>CPM{report.has_revenue ? ' vs ROAS %' : ''}</span>
                     <div style={{ display: 'flex', gap: '3px', background: '#f7f8fa', padding: '3px', borderRadius: '7px' }}>
                       {(['weekly', 'daily'] as const).map(v => (
                         <button key={v} onClick={() => setCpmView(v)} style={{ padding: '3px 10px', borderRadius: '5px', border: 'none', fontSize: '11px', fontWeight: '600', cursor: 'pointer', background: cpmView === v ? '#fff' : 'transparent', color: cpmView === v ? '#2563eb' : '#9ca3af', boxShadow: cpmView === v ? '0 1px 3px rgba(0,0,0,0.08)' : 'none' }}>{v === 'weekly' ? 'Weekly' : 'Daily'}</button>
@@ -1042,7 +1042,7 @@ export default function ReportPage() {
                       { label: 'Spend', key: 'spend' },
                       { label: 'Conv.', key: 'conversions' },
                       { label: 'CPA', key: 'cpa' },
-                      { label: 'ROAS %', key: 'roas' },
+                      ...(report.has_revenue ? [{ label: 'ROAS %', key: 'roas' as keyof Campaign }] : []),
                       { label: 'CTR', key: 'ctr' },
                       { label: 'CR', key: 'conversion_rate' },
                       { label: 'CPM', key: 'cpm' },
@@ -1096,7 +1096,9 @@ export default function ReportPage() {
                           <td style={{ padding: '11px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{fmtSpend(Number(c.spend))}</td>
                           <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{c.conversions.toLocaleString()}</td>
                           <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{fmt(c.cpa, '$')}</td>
-                          <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{c.roas != null ? `${(Number(c.roas) * 100).toFixed(0)}%` : '—'}</td>
+                          {report.has_revenue && (
+                            <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{c.roas != null ? `${(Number(c.roas) * 100).toFixed(0)}%` : '—'}</td>
+                          )}
                           <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{fmt(c.ctr, '', '%')}</td>
                           <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{fmt(c.conversion_rate, '', '%')}</td>
                           <td style={{ padding: '11px 14px', fontFamily: 'monospace' }} onClick={() => setExpandedRow(isExpanded ? null : c.campaign_name)}>{fmt(c.cpm, '$')}</td>
@@ -1107,7 +1109,7 @@ export default function ReportPage() {
                         </tr>
                         {isExpanded && (
                           <tr key={`${c.campaign_name}-exp`}>
-                            <td colSpan={13} style={{ padding: '16px 22px', background: '#f0f7ff', borderTop: '1px solid #dbeafe' }}>
+                            <td colSpan={report.has_revenue ? 13 : 12} style={{ padding: '16px 22px', background: '#f0f7ff', borderTop: '1px solid #dbeafe' }}>
                               {c.primary_issue && (
                                 <div style={{ fontSize: '12px', color: '#dc2626', fontWeight: '600', marginBottom: '8px', display: 'flex', gap: '6px', alignItems: 'center' }}>
                                   <span>⚠</span> {c.primary_issue}
@@ -1138,7 +1140,9 @@ export default function ReportPage() {
                       <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '800', color: '#111827' }}>{fmtSpend(subtotal.spend)}</td>
                       <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{subtotal.conversions.toLocaleString()}</td>
                       <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{fmt(subtotal.cpa, '$')}</td>
-                      <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{subtotal.roas != null ? `${(subtotal.roas * 100).toFixed(0)}%` : '—'}</td>
+                      {report.has_revenue && (
+                        <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{subtotal.roas != null ? `${(subtotal.roas * 100).toFixed(0)}%` : '—'}</td>
+                      )}
                       <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{fmt(subtotal.ctr, '', '%')}</td>
                       <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{fmt(subtotal.conversion_rate, '', '%')}</td>
                       <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: '700', color: '#111827' }}>{fmt(subtotal.cpm, '$')}</td>
