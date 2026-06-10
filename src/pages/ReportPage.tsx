@@ -555,8 +555,8 @@ export default function ReportPage() {
   const displayKpis = useMemo(() => {
     if (!activeAnalysis?.kpi_breakdown) return filteredKpis
     const noteMap: Record<string, string> = {}
-    for (const k of activeAnalysis.kpi_breakdown) noteMap[k.metric] = k.note
-    return filteredKpis.map(k => ({ ...k, note: noteMap[k.metric] ?? k.note }))
+    for (const k of activeAnalysis.kpi_breakdown) noteMap[normaliseMetric(k.metric)] = k.note
+    return filteredKpis.map(k => ({ ...k, note: noteMap[normaliseMetric(k.metric)] ?? k.note }))
   }, [activeAnalysis, filteredKpis])
 
   const isDateFiltered = report && (dateFrom !== report.date_range_start || dateTo !== report.date_range_end)
