@@ -1197,12 +1197,24 @@ export default function ReportPage() {
               {(activeAnalysis?.budget_reallocation ?? report.budget_reallocation) && (
                 <div style={{ ...card, padding: '18px', borderLeft: '3px solid #d97706' }}>
                   <span style={{ ...secLabel, color: '#d97706' }}>Budget Reallocation</span>
-                  <p style={{ fontSize: '13px', lineHeight: '1.75', margin: 0, color: '#374151' }}>{activeAnalysis?.budget_reallocation ?? report.budget_reallocation}</p>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {(activeAnalysis?.budget_reallocation ?? report.budget_reallocation)!
+                      .split('\n').filter((l: string) => l.trim())
+                      .map((line: string, i: number) => (
+                        <span key={i} style={{ fontSize: '13px', lineHeight: '1.65', color: '#374151', display: 'block' }}>{line.trim()}</span>
+                      ))}
+                  </div>
                 </div>
               )}
               <div style={{ ...card, padding: '18px', borderLeft: '3px solid #16a34a' }}>
                 <span style={{ ...secLabel, color: '#16a34a' }}>Next Test</span>
-                <p style={{ fontSize: '13px', lineHeight: '1.75', margin: 0, color: '#374151' }}>{activeAnalysis?.next_test ?? report.next_test}</p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {(activeAnalysis?.next_test ?? report.next_test)!
+                      .split('\n').filter((l: string) => l.trim())
+                      .map((line: string, i: number) => (
+                        <span key={i} style={{ fontSize: '13px', lineHeight: '1.65', color: '#374151', display: 'block' }}>{line.trim()}</span>
+                      ))}
+                  </div>
               </div>
             </div>
           </div>
