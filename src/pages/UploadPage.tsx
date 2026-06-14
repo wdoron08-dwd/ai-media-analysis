@@ -57,13 +57,15 @@ const OPTIONAL_FIELDS = [
   { key: 'date', label: 'Date', required: false },
   { key: 'objective', label: 'Objective', required: false },
   { key: 'performance_goal', label: 'Performance Goal', required: false },
+  { key: 'result_event_name', label: 'Results Event Name', required: false },
   { key: 'ad_set_name', label: 'Ad Set Name', required: false },
   { key: 'ad_name', label: 'Ad Name', required: false },
 ]
 
-const KPI_OPTIONS = (hasRevenue: boolean) => [
+const KPI_OPTIONS = (hasRevenue: boolean, hasInstalls: boolean) => [
   { value: 'roas', label: 'ROAS', disabled: !hasRevenue, hint: hasRevenue ? '' : 'Requires revenue column' },
   { value: 'cpa', label: 'CPA' },
+  { value: 'cpi', label: 'CPI', disabled: !hasInstalls, hint: hasInstalls ? '' : 'Requires Results Event Name column with installs' },
   { value: 'conversion_rate', label: 'Conversion Rate' },
   { value: 'ctr', label: 'CTR' },
   { value: 'volume', label: 'Conversion Volume' },
@@ -82,11 +84,11 @@ const OBJECTIVE_LABELS: Record<string, string> = {
   OUTCOME_STORE_VISITS: 'Store Visits',
 }
 
-// Default KPI suggestion per objective
+// Default KPI suggestion per objective (cpi for App Installs overridden at runtime based on hasInstalls)
 const OBJECTIVE_DEFAULT_KPI: Record<string, string> = {
   OUTCOME_SALES: 'roas', // overridden to 'cpa' when no revenue
   OUTCOME_LEADS: 'cpa',
-  OUTCOME_APP_PROMOTION: 'cpa',
+  OUTCOME_APP_PROMOTION: 'cpi', // overridden to 'cpa' when no installs detected
   OUTCOME_TRAFFIC: 'ctr',
   OUTCOME_ENGAGEMENT: 'ctr',
   OUTCOME_AWARENESS: 'cpm',
@@ -141,6 +143,17 @@ export default function UploadPage() {
 
   const hasRevenue = !!formData.columnMap['revenue']
   const hasObjectiveColumn = !!formData.columnMap['objective']
+  const hasResultEventColumn = !!formData.columnMap['result_event_name']
+
+  // hasInstalls = result event name column mapped AND any value contains 'install'
+  const hasInstalls = useMemo(() => {
+    if (!hasResultEventColumn || !rawData.length) return false
+    const col = formData.columnMap['result_event_name']
+    return rawData.some(row => {
+      const val = row[col]
+      return typeof val === 'string' && val.toLowerCase().includes('install')
+    })
+  }, [rawData, formData.columnMap, hasResultEventColumn])
 
   // Unique objectives found in the uploaded data
   const uniqueObjectives = useMemo(() => {
@@ -180,13 +193,16 @@ export default function UploadPage() {
     if (!showObjectiveStep || !uniqueObjectives.length) return
     const map: Record<string, string> = {}
     for (const obj of uniqueObjectives) {
-      // Default suggestion — fall back to cpa if no revenue for ROAS objectives
       const suggested = OBJECTIVE_DEFAULT_KPI[obj] || 'cpa'
-      map[obj] = (suggested === 'roas' && !hasRevenue) ? 'cpa' : suggested
+      // Override: roas → cpa when no revenue; cpi → cpa when no installs detected
+      let effective = suggested
+      if (effective === 'roas' && !hasRevenue) effective = 'cpa'
+      if (effective === 'cpi' && !hasInstalls) effective = 'cpa'
+      map[obj] = effective
     }
     // Only set if not already set (don't overwrite user changes)
     update({ objectiveKpiMap: { ...map, ...formData.objectiveKpiMap } })
-  }, [uniqueObjectives.join(','), hasRevenue])
+  }, [uniqueObjectives.join(','), hasRevenue, hasInstalls])
 
   const loadProfile = (profile: ClientProfile) => {
     update({
@@ -254,6 +270,7 @@ export default function UploadPage() {
           date: ['date', 'day'],
           objective: ['objective'],
           performance_goal: ['performancegoal', 'goal'],
+          result_event_name: ['resulteventname', 'resulttype', 'eventname', 'resultname'],
           ad_set_name: ['adsetname', 'adset'],
           ad_name: ['adname'],
         }
@@ -397,7 +414,7 @@ export default function UploadPage() {
     requiredTargetKeys.some(k => !formData.kpiTargets[k as keyof typeof formData.kpiTargets])
   const stepTargetsDisabled = requiredTargetKeys.some(k => !formData.kpiTargets[k as keyof typeof formData.kpiTargets])
 
-  const kpiOptions = KPI_OPTIONS(hasRevenue)
+  const kpiOptions = KPI_OPTIONS(hasRevenue, hasInstalls)
 
   const kpiLabel = (val: string) => kpiOptions.find(o => o.value === val)?.label || val.toUpperCase()
 
@@ -546,6 +563,11 @@ export default function UploadPage() {
                 ))}
               </div>
               <div style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.8px', color: 'var(--text-secondary)', marginBottom: '16px' }}>Optional Fields</div>
+              {hasInstalls && (
+                <div style={{ marginBottom: '14px', padding: '10px 14px', borderRadius: '8px', background: '#f0fdf4', border: '1px solid #bbf7d0', fontSize: '13px', color: '#16a34a' }}>
+                  ✓ App installs detected in Results Event Name — CPI available as a KPI option
+                </div>
+              )}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 {OPTIONAL_FIELDS.map(field => (
                   <div key={field.key} style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
@@ -556,6 +578,9 @@ export default function UploadPage() {
                       )}
                       {field.key === 'objective' && (
                         <span style={{ display: 'block', fontSize: '11px', color: 'var(--blue)', marginTop: '2px' }}>Enables per-objective KPI routing</span>
+                      )}
+                      {field.key === 'result_event_name' && (
+                        <span style={{ display: 'block', fontSize: '11px', color: 'var(--blue)', marginTop: '2px' }}>Enables CPI for App Install campaigns</span>
                       )}
                     </div>
                     <select style={selectStyle} value={formData.columnMap[field.key] || ''}
@@ -657,17 +682,21 @@ export default function UploadPage() {
                       </select>
                     </div>
                     {/* Suggested badge */}
-                    {formData.objectiveKpiMap[obj] === (
-                      OBJECTIVE_DEFAULT_KPI[obj] === 'roas' && !hasRevenue ? 'cpa' : (OBJECTIVE_DEFAULT_KPI[obj] || 'cpa')
-                    ) && (
-                      <div style={{
-                        fontSize: '10px', fontWeight: '700', color: 'var(--green)',
-                        background: '#f0fdf4', border: '1px solid #bbf7d0',
-                        borderRadius: '4px', padding: '2px 6px', flexShrink: 0
-                      }}>
-                        SUGGESTED
-                      </div>
-                    )}
+                    {(() => {
+                      const def = OBJECTIVE_DEFAULT_KPI[obj] || 'cpa'
+                      let effective = def
+                      if (effective === 'roas' && !hasRevenue) effective = 'cpa'
+                      if (effective === 'cpi' && !hasInstalls) effective = 'cpa'
+                      return formData.objectiveKpiMap[obj] === effective ? (
+                        <div style={{
+                          fontSize: '10px', fontWeight: '700', color: 'var(--green)',
+                          background: '#f0fdf4', border: '1px solid #bbf7d0',
+                          borderRadius: '4px', padding: '2px 6px', flexShrink: 0
+                        }}>
+                          SUGGESTED
+                        </div>
+                      ) : null
+                    })()}
                   </div>
                 ))}
               </div>
