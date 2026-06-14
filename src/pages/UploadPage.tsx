@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import * as XLSX from 'xlsx'
@@ -23,6 +23,7 @@ interface FormData {
   secondaryLabel: string
   primaryKpi: string
   secondaryKpi: string
+  objectiveKpiMap: Record<string, string>
   kpiTargets: {
     cpa: string
     conversion_rate: string
@@ -70,7 +71,37 @@ const KPI_OPTIONS = (hasRevenue: boolean) => [
   { value: 'frequency', label: 'Frequency' },
 ]
 
-const STEPS = ['Client', 'Upload', 'Mapping', 'Conversion', 'Targets', 'Run']
+// Prettify Meta objective strings
+const OBJECTIVE_LABELS: Record<string, string> = {
+  OUTCOME_SALES: 'Sales',
+  OUTCOME_TRAFFIC: 'Traffic',
+  OUTCOME_LEADS: 'Lead Gen',
+  OUTCOME_ENGAGEMENT: 'Engagement',
+  OUTCOME_AWARENESS: 'Awareness',
+  OUTCOME_APP_PROMOTION: 'App Installs',
+  OUTCOME_STORE_VISITS: 'Store Visits',
+}
+
+// Default KPI suggestion per objective
+const OBJECTIVE_DEFAULT_KPI: Record<string, string> = {
+  OUTCOME_SALES: 'roas', // overridden to 'cpa' when no revenue
+  OUTCOME_LEADS: 'cpa',
+  OUTCOME_APP_PROMOTION: 'cpa',
+  OUTCOME_TRAFFIC: 'ctr',
+  OUTCOME_ENGAGEMENT: 'ctr',
+  OUTCOME_AWARENESS: 'cpm',
+  OUTCOME_STORE_VISITS: 'cpm',
+}
+
+function prettifyObjective(raw: string): string {
+  if (OBJECTIVE_LABELS[raw]) return OBJECTIVE_LABELS[raw]
+  // Title-case fallback: OUTCOME_FOO_BAR → Foo Bar
+  return raw
+    .replace(/^OUTCOME_/i, '')
+    .split('_')
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ')
+}
 
 export default function UploadPage() {
   const navigate = useNavigate()
@@ -94,6 +125,7 @@ export default function UploadPage() {
     secondaryLabel: '',
     primaryKpi: 'cpa',
     secondaryKpi: 'conversion_rate',
+    objectiveKpiMap: {},
     kpiTargets: { cpa: '', conversion_rate: '', ctr: '', roas: '', max_frequency: '' },
     saveToProfile: false,
   })
@@ -108,6 +140,31 @@ export default function UploadPage() {
     setFormData(prev => ({ ...prev, ...fields }))
 
   const hasRevenue = !!formData.columnMap['revenue']
+  const hasObjectiveColumn = !!formData.columnMap['objective']
+
+  // Unique objectives found in the uploaded data
+  const uniqueObjectives = useMemo(() => {
+    if (!hasObjectiveColumn || !rawData.length) return []
+    const col = formData.columnMap['objective']
+    const seen = new Set<string>()
+    for (const row of rawData) {
+      const val = row[col]
+      if (val && typeof val === 'string' && val.trim()) seen.add(val.trim())
+    }
+    return Array.from(seen).sort()
+  }, [rawData, formData.columnMap, hasObjectiveColumn])
+
+  // Whether objective mapping step is active
+  const showObjectiveStep = hasObjectiveColumn && uniqueObjectives.length > 0
+
+  // Dynamic steps
+  const STEPS = showObjectiveStep
+    ? ['Client', 'Upload', 'Mapping', 'Conversion', 'Objectives', 'Targets', 'Run']
+    : ['Client', 'Upload', 'Mapping', 'Conversion', 'Targets', 'Run']
+
+  // Step indices (logical, not display)
+  const STEP_TARGETS = showObjectiveStep ? 5 : 4
+  const STEP_RUN = showObjectiveStep ? 6 : 5
 
   // Auto-suggest primary KPI when revenue mapping changes
   useEffect(() => {
@@ -117,6 +174,19 @@ export default function UploadPage() {
       update({ primaryKpi: 'cpa', secondaryKpi: 'conversion_rate' })
     }
   }, [hasRevenue])
+
+  // Auto-populate objective KPI map when objectives are first detected
+  useEffect(() => {
+    if (!showObjectiveStep || !uniqueObjectives.length) return
+    const map: Record<string, string> = {}
+    for (const obj of uniqueObjectives) {
+      // Default suggestion — fall back to cpa if no revenue for ROAS objectives
+      const suggested = OBJECTIVE_DEFAULT_KPI[obj] || 'cpa'
+      map[obj] = (suggested === 'roas' && !hasRevenue) ? 'cpa' : suggested
+    }
+    // Only set if not already set (don't overwrite user changes)
+    update({ objectiveKpiMap: { ...map, ...formData.objectiveKpiMap } })
+  }, [uniqueObjectives.join(','), hasRevenue])
 
   const loadProfile = (profile: ClientProfile) => {
     update({
@@ -212,7 +282,7 @@ export default function UploadPage() {
       setProgress('Calculating KPIs across all campaigns...')
       await new Promise(r => setTimeout(r, 400))
 
-      const kpiTargets: Record<string, number | string> = {
+      const kpiTargets: Record<string, number | string | Record<string, string>> = {
         cpa: parseFloat(formData.kpiTargets.cpa),
         conversion_rate: parseFloat(formData.kpiTargets.conversion_rate),
         ctr: parseFloat(formData.kpiTargets.ctr),
@@ -222,6 +292,9 @@ export default function UploadPage() {
       }
       if (hasRevenue && formData.kpiTargets.roas) {
         kpiTargets.roas = parseFloat(formData.kpiTargets.roas)
+      }
+      if (showObjectiveStep && Object.keys(formData.objectiveKpiMap).length > 0) {
+        kpiTargets.objective_kpi_map = formData.objectiveKpiMap
       }
 
       const payload = {
@@ -310,7 +383,7 @@ export default function UploadPage() {
     cursor: 'pointer',
   }
 
-  // Step 4 KPI target fields — ROAS only shown when revenue mapped
+  // KPI target fields
   const kpiFields = [
     { label: 'CPA Target ($)', key: 'cpa', placeholder: 'e.g. 55', avg: accountAverages.cpa, prefix: '$', suffix: '' },
     { label: 'Conversion Rate (%)', key: 'conversion_rate', placeholder: 'e.g. 0.65', avg: accountAverages.conversion_rate, prefix: '', suffix: '%' },
@@ -322,8 +395,11 @@ export default function UploadPage() {
   const requiredTargetKeys = ['cpa', 'conversion_rate', 'ctr', 'max_frequency', ...(hasRevenue ? ['roas'] : [])]
   const step4Disabled = !formData.primaryKpi || !formData.secondaryKpi || formData.primaryKpi === formData.secondaryKpi ||
     requiredTargetKeys.some(k => !formData.kpiTargets[k as keyof typeof formData.kpiTargets])
+  const stepTargetsDisabled = requiredTargetKeys.some(k => !formData.kpiTargets[k as keyof typeof formData.kpiTargets])
 
   const kpiOptions = KPI_OPTIONS(hasRevenue)
+
+  const kpiLabel = (val: string) => kpiOptions.find(o => o.value === val)?.label || val.toUpperCase()
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg-primary)' }}>
@@ -478,6 +554,9 @@ export default function UploadPage() {
                       {field.key === 'revenue' && (
                         <span style={{ display: 'block', fontSize: '11px', color: 'var(--blue)', marginTop: '2px' }}>Enables ROAS analysis</span>
                       )}
+                      {field.key === 'objective' && (
+                        <span style={{ display: 'block', fontSize: '11px', color: 'var(--blue)', marginTop: '2px' }}>Enables per-objective KPI routing</span>
+                      )}
                     </div>
                     <select style={selectStyle} value={formData.columnMap[field.key] || ''}
                       onChange={e => update({ columnMap: { ...formData.columnMap, [field.key]: e.target.value } })}>
@@ -527,7 +606,7 @@ export default function UploadPage() {
               <button
                 onClick={() => {
                   calculateAccountAverages(rawData, formData.columnMap)
-                  setCurrentStep(4)
+                  setCurrentStep(showObjectiveStep ? 4 : STEP_TARGETS)
                 }}
                 disabled={!formData.conversionLabel}
                 style={{ ...primaryBtn, opacity: !formData.conversionLabel ? 0.4 : 1 }}>
@@ -537,56 +616,145 @@ export default function UploadPage() {
           </div>
         )}
 
-        {/* ── Step 4: KPI Targets ── */}
-        {currentStep === 4 && (
+        {/* ── Step 4: Objective → KPI Mapping (conditional) ── */}
+        {currentStep === 4 && showObjectiveStep && (
+          <div>
+            <h2 style={{ fontSize: '20px', fontWeight: '700', marginBottom: '4px' }}>Objective KPI Mapping</h2>
+            <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '24px' }}>
+              Select which KPI each campaign objective should be evaluated on. Pre-suggestions are based on Meta best practices.
+            </p>
+            <div style={cardStyle}>
+              <div style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.8px', color: 'var(--text-secondary)', marginBottom: '20px' }}>
+                {uniqueObjectives.length} objective{uniqueObjectives.length !== 1 ? 's' : ''} found in your file
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                {uniqueObjectives.map(obj => (
+                  <div key={obj} style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                    {/* Objective label */}
+                    <div style={{ flex: '0 0 200px' }}>
+                      <div style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)' }}>
+                        {prettifyObjective(obj)}
+                      </div>
+                      <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px', fontFamily: 'monospace' }}>
+                        {obj}
+                      </div>
+                    </div>
+                    {/* Arrow */}
+                    <div style={{ fontSize: '16px', color: 'var(--text-secondary)', flexShrink: 0 }}>→</div>
+                    {/* KPI dropdown */}
+                    <div style={{ flex: 1 }}>
+                      <select
+                        style={selectStyle}
+                        value={formData.objectiveKpiMap[obj] || 'cpa'}
+                        onChange={e => update({
+                          objectiveKpiMap: { ...formData.objectiveKpiMap, [obj]: e.target.value }
+                        })}>
+                        {kpiOptions.map(o => (
+                          <option key={o.value} value={o.value} disabled={o.disabled}>
+                            {o.label}{o.hint ? ` (${o.hint})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    {/* Suggested badge */}
+                    {formData.objectiveKpiMap[obj] === (
+                      OBJECTIVE_DEFAULT_KPI[obj] === 'roas' && !hasRevenue ? 'cpa' : (OBJECTIVE_DEFAULT_KPI[obj] || 'cpa')
+                    ) && (
+                      <div style={{
+                        fontSize: '10px', fontWeight: '700', color: 'var(--green)',
+                        background: '#f0fdf4', border: '1px solid #bbf7d0',
+                        borderRadius: '4px', padding: '2px 6px', flexShrink: 0
+                      }}>
+                        SUGGESTED
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', marginTop: '24px' }}>
+              <button onClick={() => setCurrentStep(3)} style={ghostBtn}>← Back</button>
+              <button onClick={() => setCurrentStep(STEP_TARGETS)} style={primaryBtn}>
+                Continue →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Step Targets: KPI Targets ── */}
+        {currentStep === STEP_TARGETS && (
           <div>
             <h2 style={{ fontSize: '20px', fontWeight: '700', marginBottom: '4px' }}>KPI Targets</h2>
             <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '24px' }}>
-              Set your targets and select the KPIs that drive verdict decisions.
+              Set your performance targets. These thresholds drive verdict decisions.
             </p>
 
-            {/* Primary & Secondary KPI selectors */}
-            <div style={cardStyle}>
-              <div style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.8px', color: 'var(--text-secondary)', marginBottom: '16px' }}>Verdict KPIs</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '4px' }}>
-                {/* Primary KPI */}
-                <div>
-                  <label style={{ display: 'block', fontSize: '13px', fontWeight: '600', marginBottom: '6px' }}>
-                    Primary KPI
-                    <span style={{ fontSize: '11px', fontWeight: '400', color: 'var(--text-secondary)', marginLeft: '6px' }}>drives verdicts</span>
-                  </label>
-                  <select style={selectStyle} value={formData.primaryKpi}
-                    onChange={e => update({ primaryKpi: e.target.value })}>
-                    {kpiOptions.map(o => (
-                      <option key={o.value} value={o.value} disabled={o.disabled || o.value === formData.secondaryKpi}>
-                        {o.label}{o.hint ? ` (${o.hint})` : ''}
-                      </option>
-                    ))}
-                  </select>
+            {/* Primary & Secondary KPI selectors — only shown when no objective mapping */}
+            {!showObjectiveStep && (
+              <div style={cardStyle}>
+                <div style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.8px', color: 'var(--text-secondary)', marginBottom: '16px' }}>Verdict KPIs</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '4px' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '13px', fontWeight: '600', marginBottom: '6px' }}>
+                      Primary KPI
+                      <span style={{ fontSize: '11px', fontWeight: '400', color: 'var(--text-secondary)', marginLeft: '6px' }}>drives verdicts</span>
+                    </label>
+                    <select style={selectStyle} value={formData.primaryKpi}
+                      onChange={e => update({ primaryKpi: e.target.value })}>
+                      {kpiOptions.map(o => (
+                        <option key={o.value} value={o.value} disabled={o.disabled || o.value === formData.secondaryKpi}>
+                          {o.label}{o.hint ? ` (${o.hint})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '13px', fontWeight: '600', marginBottom: '6px' }}>
+                      Secondary KPI
+                      <span style={{ fontSize: '11px', fontWeight: '400', color: 'var(--text-secondary)', marginLeft: '6px' }}>informs recommendations</span>
+                    </label>
+                    <select style={selectStyle} value={formData.secondaryKpi}
+                      onChange={e => update({ secondaryKpi: e.target.value })}>
+                      {kpiOptions.map(o => (
+                        <option key={o.value} value={o.value} disabled={o.disabled || o.value === formData.primaryKpi}>
+                          {o.label}{o.hint ? ` (${o.hint})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
-                {/* Secondary KPI */}
-                <div>
-                  <label style={{ display: 'block', fontSize: '13px', fontWeight: '600', marginBottom: '6px' }}>
-                    Secondary KPI
-                    <span style={{ fontSize: '11px', fontWeight: '400', color: 'var(--text-secondary)', marginLeft: '6px' }}>informs recommendations</span>
-                  </label>
-                  <select style={selectStyle} value={formData.secondaryKpi}
-                    onChange={e => update({ secondaryKpi: e.target.value })}>
-                    {kpiOptions.map(o => (
-                      <option key={o.value} value={o.value} disabled={o.disabled || o.value === formData.primaryKpi}>
-                        {o.label}{o.hint ? ` (${o.hint})` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                {formData.primaryKpi === formData.secondaryKpi && (
+                  <div style={{ fontSize: '12px', color: 'var(--red)', marginTop: '8px' }}>Primary and secondary KPI must be different.</div>
+                )}
               </div>
-              {formData.primaryKpi === formData.secondaryKpi && (
-                <div style={{ fontSize: '12px', color: 'var(--red)', marginTop: '8px' }}>Primary and secondary KPI must be different.</div>
-              )}
-            </div>
+            )}
+
+            {/* Objective mapping summary — shown when objective step was completed */}
+            {showObjectiveStep && (
+              <div style={{ ...cardStyle, marginBottom: '16px', background: '#f0fdf4', border: '1px solid #bbf7d0' }}>
+                <div style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.8px', color: '#16a34a', marginBottom: '12px' }}>
+                  ✓ Objective KPI Routing Active
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {uniqueObjectives.map(obj => (
+                    <div key={obj} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>{prettifyObjective(obj)}</span>
+                      <span style={{ fontWeight: '600', color: 'var(--text-primary)' }}>
+                        {kpiLabel(formData.objectiveKpiMap[obj] || 'cpa')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  onClick={() => setCurrentStep(4)}
+                  style={{ marginTop: '12px', fontSize: '12px', color: 'var(--blue)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                  ← Edit objective mapping
+                </button>
+              </div>
+            )}
 
             {/* KPI Targets */}
-            <div style={{ ...cardStyle, marginTop: '16px' }}>
+            <div style={{ ...cardStyle, marginTop: showObjectiveStep ? '0' : '16px' }}>
               <div style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.8px', color: 'var(--text-secondary)', marginBottom: '16px' }}>Performance Targets</div>
               {!hasRevenue && (
                 <div style={{ marginBottom: '16px', padding: '10px 14px', borderRadius: '8px', background: '#fffbeb', border: '1px solid #fcd34d', fontSize: '13px', color: '#92400e' }}>
@@ -599,8 +767,12 @@ export default function UploadPage() {
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
                       <label style={{ fontSize: '13px', fontWeight: '500', display: 'flex', alignItems: 'center', gap: '6px' }}>
                         {label}
-                        {key === formData.primaryKpi && <span style={{ fontSize: '10px', fontWeight: '700', background: '#2563eb', color: '#fff', padding: '1px 6px', borderRadius: '4px' }}>PRIMARY</span>}
-                        {key === formData.secondaryKpi && <span style={{ fontSize: '10px', fontWeight: '700', background: '#e0e7ff', color: '#2563eb', padding: '1px 6px', borderRadius: '4px' }}>SECONDARY</span>}
+                        {!showObjectiveStep && key === formData.primaryKpi && (
+                          <span style={{ fontSize: '10px', fontWeight: '700', background: '#2563eb', color: '#fff', padding: '1px 6px', borderRadius: '4px' }}>PRIMARY</span>
+                        )}
+                        {!showObjectiveStep && key === formData.secondaryKpi && (
+                          <span style={{ fontSize: '10px', fontWeight: '700', background: '#e0e7ff', color: '#2563eb', padding: '1px 6px', borderRadius: '4px' }}>SECONDARY</span>
+                        )}
                       </label>
                       {avg !== null && avg !== undefined && (
                         <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
@@ -626,18 +798,18 @@ export default function UploadPage() {
             </div>
 
             <div style={{ display: 'flex', gap: '8px', marginTop: '24px' }}>
-              <button onClick={() => setCurrentStep(3)} style={ghostBtn}>← Back</button>
-              <button onClick={() => setCurrentStep(5)}
-                disabled={step4Disabled}
-                style={{ ...primaryBtn, opacity: step4Disabled ? 0.4 : 1 }}>
+              <button onClick={() => setCurrentStep(showObjectiveStep ? 4 : 3)} style={ghostBtn}>← Back</button>
+              <button onClick={() => setCurrentStep(STEP_RUN)}
+                disabled={showObjectiveStep ? stepTargetsDisabled : step4Disabled}
+                style={{ ...primaryBtn, opacity: (showObjectiveStep ? stepTargetsDisabled : step4Disabled) ? 0.4 : 1 }}>
                 Continue →
               </button>
             </div>
           </div>
         )}
 
-        {/* ── Step 5: Run ── */}
-        {currentStep === 5 && (
+        {/* ── Step Run: Run Analysis ── */}
+        {currentStep === STEP_RUN && (
           <div>
             <h2 style={{ fontSize: '20px', fontWeight: '700', marginBottom: '4px' }}>Run Analysis</h2>
             <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '24px' }}>Everything is configured. Ready to analyze.</p>
@@ -646,8 +818,16 @@ export default function UploadPage() {
                 { label: 'Client', value: formData.clientName },
                 { label: 'File', value: formData.file?.name },
                 { label: 'Rows', value: formData.rowCount.toString() },
-                { label: 'Primary KPI', value: formData.primaryKpi.toUpperCase() },
-                { label: 'Secondary KPI', value: formData.secondaryKpi.toUpperCase() },
+                ...(showObjectiveStep
+                  ? uniqueObjectives.map(obj => ({
+                      label: prettifyObjective(obj),
+                      value: kpiLabel(formData.objectiveKpiMap[obj] || 'cpa'),
+                    }))
+                  : [
+                      { label: 'Primary KPI', value: kpiLabel(formData.primaryKpi) },
+                      { label: 'Secondary KPI', value: kpiLabel(formData.secondaryKpi) },
+                    ]
+                ),
                 { label: 'CPA Target', value: `$${formData.kpiTargets.cpa}` },
                 ...(hasRevenue ? [{ label: 'ROAS Target', value: `${formData.kpiTargets.roas}%` }] : []),
                 { label: 'Revenue Data', value: hasRevenue ? '✓ Mapped' : 'Not available' },
@@ -675,7 +855,7 @@ export default function UploadPage() {
               </div>
             )}
             <div style={{ display: 'flex', gap: '8px' }}>
-              <button onClick={() => setCurrentStep(4)} style={ghostBtn}>← Back</button>
+              <button onClick={() => setCurrentStep(STEP_TARGETS)} style={ghostBtn}>← Back</button>
               <button onClick={runAnalysis} disabled={!!progress}
                 style={{ ...primaryBtn, opacity: progress ? 0.4 : 1 }}>
                 {progress ? 'Running...' : 'Run Analysis →'}
