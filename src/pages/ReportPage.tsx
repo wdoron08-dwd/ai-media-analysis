@@ -1196,25 +1196,35 @@ export default function ReportPage() {
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
               {(activeAnalysis?.budget_reallocation ?? report.budget_reallocation) && (
                 <div style={{ ...card, padding: '18px', borderLeft: '3px solid #d97706' }}>
-                  <span style={{ ...secLabel, color: '#d97706' }}>Budget Reallocation</span>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '7px', marginBottom: '14px' }}>
+                    <span style={{ fontSize: '11px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '0.8px', color: '#d97706' }}>Budget Reallocation</span>
+                  </div>
+                  <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {(activeAnalysis?.budget_reallocation ?? report.budget_reallocation)!
                       .split('\n').filter((l: string) => l.trim())
                       .map((line: string, i: number) => (
-                        <span key={i} style={{ fontSize: '13px', lineHeight: '1.65', color: '#374151', display: 'block', paddingLeft: '14px', textIndent: '-14px' }}>{line.trim()}</span>
+                        <li key={i} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                          <div style={{ width: '4px', height: '4px', borderRadius: '50%', background: '#fcd34d', marginTop: '8px', flexShrink: 0 }} />
+                          <span style={{ fontSize: '12px', lineHeight: '1.65', color: '#374151' }}>{line.replace(/^[•\-]\s*/, '').trim()}</span>
+                        </li>
                       ))}
-                  </div>
+                  </ul>
                 </div>
               )}
               <div style={{ ...card, padding: '18px', borderLeft: '3px solid #16a34a' }}>
-                <span style={{ ...secLabel, color: '#16a34a' }}>Next Test</span>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    {(activeAnalysis?.next_test ?? report.next_test)!
-                      .split('\n').filter((l: string) => l.trim())
-                      .map((line: string, i: number) => (
-                        <span key={i} style={{ fontSize: '13px', lineHeight: '1.65', color: '#374151', display: 'block', paddingLeft: '14px', textIndent: '-14px' }}>{line.trim()}</span>
-                      ))}
-                  </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '7px', marginBottom: '14px' }}>
+                  <span style={{ fontSize: '11px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '0.8px', color: '#16a34a' }}>Next Test</span>
+                </div>
+                <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {(activeAnalysis?.next_test ?? report.next_test)!
+                    .split('\n').filter((l: string) => l.trim())
+                    .map((line: string, i: number) => (
+                      <li key={i} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                        <div style={{ width: '4px', height: '4px', borderRadius: '50%', background: '#86efac', marginTop: '8px', flexShrink: 0 }} />
+                        <span style={{ fontSize: '12px', lineHeight: '1.65', color: '#374151' }}>{line.replace(/^[•\-]\s*/, '').trim()}</span>
+                      </li>
+                    ))}
+                </ul>
               </div>
             </div>
           </div>
