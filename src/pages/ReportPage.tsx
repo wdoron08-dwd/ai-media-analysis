@@ -1201,7 +1201,7 @@ export default function ReportPage() {
                     {(activeAnalysis?.budget_reallocation ?? report.budget_reallocation)!
                       .split('\n').filter((l: string) => l.trim())
                       .map((line: string, i: number) => (
-                        <span key={i} style={{ fontSize: '13px', lineHeight: '1.65', color: '#374151', display: 'block' }}>{line.trim()}</span>
+                        <span key={i} style={{ fontSize: '13px', lineHeight: '1.65', color: '#374151', display: 'block', paddingLeft: '14px', textIndent: '-14px' }}>{line.trim()}</span>
                       ))}
                   </div>
                 </div>
@@ -1212,7 +1212,7 @@ export default function ReportPage() {
                     {(activeAnalysis?.next_test ?? report.next_test)!
                       .split('\n').filter((l: string) => l.trim())
                       .map((line: string, i: number) => (
-                        <span key={i} style={{ fontSize: '13px', lineHeight: '1.65', color: '#374151', display: 'block' }}>{line.trim()}</span>
+                        <span key={i} style={{ fontSize: '13px', lineHeight: '1.65', color: '#374151', display: 'block', paddingLeft: '14px', textIndent: '-14px' }}>{line.trim()}</span>
                       ))}
                   </div>
               </div>
